@@ -64,6 +64,7 @@ export interface BrokerRequest {
   arguments?: Record<string, unknown>;
   input?: string;
   invokeDeadlineAt?: number;
+  includeResultReceipt?: boolean;
   handoffId?: string;
   summary?: string;
   index?: number;
