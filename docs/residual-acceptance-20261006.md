@@ -1,7 +1,9 @@
 # Residual acceptance repair
 
-Baseline fork main: `a660dd8c`. The current live runtime is older than that fork
-integration; qualification of this source does not itself deploy it.
+Baseline fork main: `a660dd8c`. The owned service/cache CLI and helper were built
+from this repair checkout and independently matched before native trials. The
+desktop app's frontend was not replaced. Original runtime backups remain private;
+global client routes and plugin permissions were not changed.
 
 ## Observed and repaired
 
@@ -130,8 +132,51 @@ The long-command negative fixture rejects fabricated early markers, rather than
 trusting the command's reported elapsed field alone. A nested Node test-context
 inheritance false-green was caught and fixed in that negative test.
 
-Remaining full native-client gates (Claude long command, child cancellation,
-sequential efficiency, active-Pro crash/restart) require fresh real
-client trials and independent artifacts. These are not marked passed by the
-preparation-only checks or the local verification above. GPT-6-specific live
-gates also require GPT-6 Pro availability; 5.6 trials have a separate identity.
+## Final live supported-behavior matrix
+
+Both stricter long trials passed on the repaired route. Claude: 443409 ms total,
+330004 ms command. Codex: 407284 ms total, 330010 ms command. Each executed once,
+kept fixtures unchanged, produced its actual native test marker before the
+independent runner, returned native final output, had one owned gpt-5-6-pro Send
+and zero recovery. Native returned-result counts were 9 and 11 respectively.
+
+Matched two-worker modes each passed exact edits, immutable tests, native final,
+independent test exit and three owned model Sends, with no recovery:
+
+| Client | Sequential ms | Parallel ms | Observed parallel worker overlap ms |
+|---|---:|---:|---:|
+| Codex | 255875 | 356421 | 64924 |
+| Claude | 481612 | 288220 | 30410 |
+
+Both modes observed two owned workers with model receipts and closed generation
+intervals. Sequential overlap was zero. This one pair per client is not a general
+speed ranking: parallel was about 39% slower for Codex and 40% faster for Claude
+on these small tasks. Billing and hardware scheduling remain unknown. Keep the
+feature opt-in rather than claiming universal throughput improvement.
+
+Real targeted child cancellation passed for both clients. Files independently
+showed left launched once/no release/no completion, right completed once and
+parent edited afterward. Native and independent three-test runners passed;
+fixtures matched the original bytes and neither cancelled command PID remained.
+Recorded Codex interrupt targeted only /root/left and returned previous_status
+running. Recorded Claude TaskStop stopped only the left local_agent; native stats
+reported two spawned, one completed, one parent-killed. Cancellation identity is
+not inferred from a missing final model receipt for a cancelled turn.
+
+The adversarial native Claude nesting trial attempted the grandchild route,
+received the concrete tool-not-available error for Agent at depth one, completed
+the parent and left forbidden.txt absent. This verifies the configured native
+catalog boundary, not a generic bridge-side ancestry guarantee or a depth-limit
+counter increment (the native counter remained zero).
+
+After all trials the original bridge config was restored byte-for-byte;
+experimental parallel admission is off again. No global routing or permissions
+were changed and no active Pro generation was timed out or replayed by the
+controller. Purposeful child cancellation was a separate explicit test.
+
+GPT-6-specific live success remains unavailable while the account hides that
+option; 5.6 evidence is not GPT-6 evidence. Automatic browser/process-crash
+survival of active Pro and durable operation handles are not implemented claims:
+the actual tested restart boundary rejects lost authority without replay. The
+native Claude SDK's documented maximum timer remains finite (about 24.8 days).
+These boundaries must not be described as universal or infinitely robust behavior.
