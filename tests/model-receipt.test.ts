@@ -344,11 +344,9 @@ class FakeTeePage extends FakePage {
 
 test("late binding installation cannot evaluate or uninstall after observer retirement", async () => {
   let release!: () => void;
-  let markRetired!: () => void;
-  const retired = new Promise<void>(resolve => { markRetired = resolve; });
   class LateCdp extends FakeCdp {
     calls = 0;
-    override async detach() { await super.detach(); if (++this.calls === 2) markRetired(); }
+    override async detach() { await super.detach(); this.calls++; }
   }
   class LatePage extends FakeTeePage {
     evaluations = 0;
@@ -357,11 +355,15 @@ test("late binding installation cannot evaluate or uninstall after observer reti
   }
   const page = new LatePage(new LateCdp());
   const observer = new ChatGptModelReceiptObserver("late_binding", "route", undefined);
+  const ensure = observer.ensurePageCaptureReady.bind(observer);
+  let preparation = Promise.resolve();
+  observer.ensurePageCaptureReady = () => { preparation = ensure(); return preparation; };
   await observer.attach(page as never);
   await observer.detach();
   release();
-  await retired;
+  await preparation;
   expect(page.evaluations).toBe(0);
+  expect(page.cdp.detached).toBeTrue();
   await observer.dispose();
 });
 
