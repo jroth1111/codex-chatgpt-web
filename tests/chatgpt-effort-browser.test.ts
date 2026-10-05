@@ -46,7 +46,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
   } finally { await browser.close(); }
 }, 30_000);
 
-for (const scenario of ["hydrate", "shrink", "locked", "pro-disappears"])
+for (const scenario of ["hydrate", "shrink", "locked", "pro-disappears", "missing-pro"])
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keeps the requested available effort`, async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
@@ -55,7 +55,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
       <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Instant</button></form>
       <div id="picker" role="menu" hidden><div role="menuitem" tabindex="0"><div data-model-picker-power-slider style="height:30px;width:250px"></div></div></div>
       <script>
-        let value=0, max=4, opens=0;
+        let value=0, max=${scenario === "missing-pro" ? 3 : 4}, opens=0;
         const scenario=${JSON.stringify(scenario)}, control=document.querySelector('button'), menu=document.querySelector('#picker');
         function render(ticks=max+1) {
           document.querySelector('[data-model-picker-power-slider]').innerHTML='<span data-orientation="horizontal" aria-disabled="false">'
@@ -78,7 +78,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
       expect(await detectChatGptAccountCapabilities(page)).toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
     } else {
       const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
-      const effort = scenario === "pro-disappears" ? "max" : scenario === "locked" ? "high" : "xhigh";
+      const effort = scenario === "pro-disappears" || scenario === "missing-pro" ? "max" : scenario === "locked" ? "high" : "xhigh";
       const result = worker.selectModelAndEffort(page, "gpt-5.6-sol", effort, {
         localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
       });

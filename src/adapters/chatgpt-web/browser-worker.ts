@@ -159,6 +159,7 @@ import { chatGptParallelAdmission, type ParallelAdmissionIdentity } from "./para
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptRetainedSurfaceUnavailableError, chatGptSessionExpiredError, chatGptStoppedThinkingError, chatGptWebSurfaceError } from "./adapter-error";
 import { ChatGptAnswerBuffer } from "./browser-answer-buffer";
 import { ChatGptBrowserDiagnostics, readChatGptUpstreamFailureUiState, redactChatGptUiDiagnostic } from "./browser-diagnostics";
+import { modelControlDiagnostic } from "./model-control-diagnostic";
 import { CHATGPT_CONNECTOR_MENTION_ROW_SELECTOR, chatGptConnectorMentionRowHighlighted, openChatGptConnectorPlusMenu } from "./connector-plus-menu";
 import { assertChatGptModelFamily, chatGptModelFamilyMatches, selectChatGptModelFamily } from "./model-selection";
 import {
@@ -5676,6 +5677,12 @@ export class ChatGptBrowserWorker {
           await diagnostics.capture(diagnosticPage, "compaction-handoff-accepted");
         }
         throw turn.abortSignal.reason;
+      }
+      const modelControlFailure = modelControlDiagnostic(error);
+      if (modelControlFailure) {
+        try { console.info(`[chatgpt-web] model_control_failure ${JSON.stringify({
+          traceId: turn.traceId, ...modelControlFailure,
+        })}`); } catch { /* Diagnostics cannot replace the original failure. */ }
       }
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
