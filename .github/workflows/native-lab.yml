@@ -2,7 +2,7 @@ name: Native lab offline contracts
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, test/comprehensive-acceptance-20261005]
 permissions:
   contents: read
 jobs:
