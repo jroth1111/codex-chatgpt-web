@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { SERVED_MODEL } from './launch-args.mjs';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 function decodeLines(text) {
@@ -45,7 +46,7 @@ export function nativeMetrics(artifact) {
   }
   const exit = events.findLast(event => event.type === 'session_exit');
   const latches = events.filter(event => event.type === 'quota_latch');
-  const responseEvents = events.filter(event => event.type === 'response_end' && event.scope === 'gpt-6-pro-inference');
+  const responseEvents = events.filter(event => event.type === 'response_end' && event.scope === `${SERVED_MODEL}-inference`);
   return { native_exit: exit?.code ?? null,
     capture_parse_errors: captureErrors, capture_complete: captureErrors === 0,
     quota_latched: latches.some(event => !event.reason?.startsWith('diagnostic_')),

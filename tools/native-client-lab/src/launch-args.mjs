@@ -6,8 +6,13 @@ import { fileURLToPath } from 'node:url';
 
 export const CODEX_VERSION = '0.159.2';
 export const CLAUDE_MIN_VERSION = [2, 1, 285];
-export const CODEX_MODEL = 'chatgpt-web/gpt-6-pro';
-export const CLAUDE_MODEL = 'claude-chatgpt-web-gpt-6-pro';
+// Explicit invocation-only selection, never an automatic availability fallback.
+export const PRO_FAMILY = process.env.ASTRA6_PRO_FAMILY ?? '6';
+if (!['6', '5.6'].includes(PRO_FAMILY)) throw new Error('ASTRA6_PRO_FAMILY must be 6 or 5.6');
+// The owned 5.6 provider response uses a hyphenated version, unlike client aliases.
+export const SERVED_MODEL = `gpt-${PRO_FAMILY === '5.6' ? '5-6' : PRO_FAMILY}-pro`;
+export const CODEX_MODEL = `chatgpt-web/gpt-${PRO_FAMILY}-pro`;
+export const CLAUDE_MODEL = `claude-chatgpt-web-gpt-${PRO_FAMILY}-pro`;
 export function executableOnPath(name) {
   for (const directory of (process.env.PATH || '').split(path.delimiter)) {
     for (const suffix of process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']) {
@@ -87,7 +92,7 @@ export function assertExactCodexCatalog(catalog) {
   const efforts = levels?.map(level => level?.effort);
   if (rows.length !== 1 || row?.slug !== CODEX_MODEL || row?.default_reasoning_level !== 'max'
     || JSON.stringify(efforts) !== JSON.stringify(['max'])) {
-    throw new Error('Codex catalog must contain only chatgpt-web/gpt-6-pro with max effort');
+    throw new Error(`Codex catalog must contain only ${CODEX_MODEL} with max effort`);
   }
   return catalog;
 }

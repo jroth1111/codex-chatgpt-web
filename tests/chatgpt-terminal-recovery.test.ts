@@ -59,6 +59,27 @@ test("a terminal ChatGPT error continues once without pressing the Web retry but
   expect(chatGptTerminalErrorRetryPrompt(failure!, 1, "partial answer")).toBeUndefined();
 });
 
+test("cancellation never consults a recovery callback that the parent will suppress", async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const base = { attempt: 1, emittedText: "", compaction: false,
+    sessionRetry: async () => { calls++; return new Promise<string>(() => {}); } };
+  expect(await chatGptBrowserErrorRetryPrompt({ ...base, error: new DOMException("cancel", "AbortError") })).toBeUndefined();
+  controller.abort();
+  expect(await chatGptBrowserErrorRetryPrompt({ ...base, error: new Error("failure"), signal: controller.signal })).toBeUndefined();
+  expect(calls).toBe(0);
+});
+
+test("cancellation settles an already pending recovery consultation without a query deadline", async () => {
+  const controller = new AbortController();
+  const result = chatGptBrowserErrorRetryPrompt({ error: new Error("failure"), attempt: 1,
+    emittedText: "", compaction: false, signal: controller.signal,
+    sessionRetry: async () => new Promise<string>(() => {}) });
+  await Promise.resolve();
+  controller.abort();
+  await expect(result).rejects.toMatchObject({ name: "AbortError" });
+});
+
 test("an Enhanced session retry decision is authoritative over the generic upstream retry", async () => {
   const failure = new ChatGptWebAdapterError(
     "upstream failed",

@@ -1,4 +1,5 @@
 import { digest } from './benchmark-metrics.mjs';
+import { SERVED_MODEL } from './launch-args.mjs';
 
 export function parallelEvidence(log, cwd) {
   const workflow = [], admissions = [], receipts = [];
@@ -21,7 +22,7 @@ export function parallelEvidence(log, cwd) {
       }
     }
   }
-  const served = new Set(receipts.filter(row => owned.has(row.traceId) && row.source === 'network.resolved_model_slug' && row.servedModel === 'gpt-6-pro').map(row => row.traceId));
+  const served = new Set(receipts.filter(row => owned.has(row.traceId) && row.source === 'network.resolved_model_slug' && row.servedModel === SERVED_MODEL).map(row => row.traceId));
   const observed = new Set(intervals.map(interval => interval.traceId));
   let overlap = 0;
   for (let i = 0; i < intervals.length; i++) for (let j = i + 1; j < intervals.length; j++) {

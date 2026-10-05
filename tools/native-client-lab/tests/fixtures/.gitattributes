@@ -1,0 +1,2 @@
+# Recorded-wire hashes and SSE boundaries must have identical bytes on Windows.
+*.sse text eol=lf

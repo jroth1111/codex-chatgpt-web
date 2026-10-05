@@ -60,6 +60,8 @@ describe("reversible Claude Code integration", () => {
       ANTHROPIC_BASE_URL: "http://127.0.0.1:17841",
       ANTHROPIC_AUTH_TOKEN: "codex-chatgpt-web-local",
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+      API_TIMEOUT_MS: "2147483647",
+      CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: "0",
       CODEX_CHATGPT_WEB_CONTROL_TOKEN: config.controlToken,
     });
     expect(installed.env).not.toHaveProperty("CLAUDE_CODE_BRIEF");
@@ -76,6 +78,15 @@ describe("reversible Claude Code integration", () => {
     expect(installed.hooks.PostToolUse).toContainEqual(steeringHook);
     expect(installed.hooks.PostToolUseFailure).toContainEqual(steeringHook);
     expect(existsSync(getClaudeIntegrationJournalPath())).toBe(true);
+  });
+
+  test("slow-provider client settings are journaled and restore the user's original limits", () => {
+    fixture({ env: { API_TIMEOUT_MS: "123456", CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: "2", KEEP: "unchanged" } });
+    installClaudeIntegration(defaultConfig("browser-only"));
+    expect(settings().env.API_TIMEOUT_MS).toBe("2147483647");
+    expect(settings().env.CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES).toBe("0");
+    uninstallClaudeIntegration();
+    expect(settings().env).toEqual({ API_TIMEOUT_MS: "123456", CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: "2", KEEP: "unchanged" });
   });
 
   test("exposes Luna and Think to Claude Code on Luna-only accounts", () => {

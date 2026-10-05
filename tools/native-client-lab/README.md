@@ -6,6 +6,15 @@ From this directory, run `node --test tests/*.test.mjs` for offline tests. Bun i
 
 With a ready, signed-in bridge whose health/config/source versions agree:
 
+The default is GPT-6 Pro. To test 5.6 Pro explicitly, prefix the entire launcher
+or benchmark invocation with `ASTRA6_PRO_FAMILY=5.6`. Only `6` and `5.6` are
+accepted. This pins the native client, one-row catalog, recording proxy and
+served-model oracle to the chosen family; it never falls back automatically.
+5.6 results must not be reported as GPT-6 acceptance. Default GPT-6 runs still
+require `gpt-6-pro` on every owned physical Send.
+The client alias `gpt-5.6-pro` is distinct from its empirically observed provider
+wire identifier `gpt-5-6-pro`; 5.6 receipt validation requires the latter exactly.
+
 ```sh
 node bin/codex-astrapro.mjs --headless --diagnostic --cwd /absolute/disposable/project --prompt-file /absolute/task.txt
 node bin/claude-astrapro.mjs --headless --diagnostic --cwd /absolute/disposable/project --prompt-file /absolute/task.txt
@@ -27,3 +36,38 @@ Client tool-item counts also declare limited coverage. Prefer `returned_native_t
 Model attestation requires a consistent owned receipt for every observed physical
 Send. One resolved Pro receipt cannot cover an unidentified recovery or child Send;
 conflicting duplicate receipts also make aggregate identity unavailable.
+
+`bin/long-benchmark.mjs --client codex|claude --provider-log /private/log`
+uses a disposable, immutable 330-second command and an independent test runner.
+Pass the normal `--source-root`, `--cli-path`, `--output-root` and explicitly
+authorized `--unsafe` flags as needed. It preserves the same native child without
+a query deadline or automatic retry. Its oracle requires actual completion,
+once-only markers, filesystem timing, unchanged fixtures, native final delivery
+and the selected family's owned wire identity. A terminal failure stops the
+trial; it does not start a replacement command.
+
+Claude's API request timer otherwise defaults to ten minutes. Lab invocations
+and reversible managed integration use its documented maximum `2147483647`
+milliseconds (about 24.8 days), never an overflowing larger value or `Infinity`.
+That native SDK limit is finite; only the bridge itself has no query deadline.
+Non-streaming timeout re-sends are disabled. Transport watchdogs remain intact;
+normal SSE pings are keepalives, not claimed provider progress.
+See [Claude's environment reference](https://code.claude.com/docs/en/env-vars).
+
+`ASTRA6_PRO_FAMILY=5.6 node bin/slow-client-replay.mjs --cli-path /absolute/native/claude`
+is a separate real-client latency control: it replays the hashed actual
+client-facing final recording after 615 seconds with keepalives. It is NOT live
+provider inference, model identity, editing or task acceptance evidence. It
+requires one inference request, native exit 0 and the exact recorded final.
+The lab scrubs Herdr pane markers from child environments so a PATH shim cannot
+silently invoke another provider launcher and rewrite the explicitly owned
+route/retry settings. Global Herdr, client and bridge configuration are unchanged.
+
+New Claude sessions use separate profiles/settings keyed by the native session
+UUID. A known resume reuses its original profile; unknown IDs fail before new
+inference. Existing legacy transcripts use the old shared profile for compatibility
+and should not be resumed concurrently. `--parallel-agents` also pins native
+Claude spawn depth to one for this invocation and its settings, not globally.
+The long-command oracle requires a client-generated test marker before the
+independent host runner executes; a correct command artifact plus host tests
+cannot hide a client that never ran its requested verification.

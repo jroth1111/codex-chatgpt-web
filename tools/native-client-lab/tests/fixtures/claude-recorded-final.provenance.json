@@ -1,0 +1,11 @@
+{
+  "kind": "sanitized_client_facing_recording",
+  "source": "accepted counterbalanced 5.6 Pro Claude basic trial, final response 0016",
+  "clientVersion": "2.1.286",
+  "sourceRuntimeCommit": "3cbd959dda9c18fc5707a7d3f95d0b6782884b92",
+  "originalSha256": "5d63688a8c69e691fe1aa8c7d49321772413bd7a7198658d188b7d69bcfccfd8",
+  "fixtureSha256": "216cfe8c9e1b442c6099d1ca39b2eaa4b26747a62877a18b1a61c7919fc5bd34",
+  "sanitization": "Replaced the opaque message id; trimmed trailing whitespace. Other frame bytes unchanged.",
+  "providerIdentityEvidence": false,
+  "purpose": "Real native-client delayed-stream compatibility control, not live backend inference acceptance."
+}

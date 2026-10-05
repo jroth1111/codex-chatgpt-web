@@ -3,6 +3,7 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 import {
   CHATGPT_SAME_SURFACE_RECOVERY_PROMPT,
   chatGptSameSurfaceRecoveryDecision,
+  withAbort,
 } from "./runtime-lifecycle";
 import { chatGptTurnSessions } from "./turn-execution";
 
@@ -48,7 +49,12 @@ export async function chatGptBrowserErrorRetryPrompt(options: {
   emittedText: string;
   compaction: boolean;
   sessionRetry?: ErrorRetry;
+  signal?: AbortSignal;
 }): Promise<ErrorRetryResult> {
+  // The parent suppresses callbacks after a local failure. Consulting it again
+  // after cancellation can deadlock; an abort is terminal, not retryable work.
+  if (options.signal?.aborted || options.error.name === "AbortError"
+    || (options.error instanceof ChatGptWebAdapterError && options.error.code === "client_cancelled")) return undefined;
   if (options.compaction) {
     return chatGptTerminalErrorRetryPrompt(
       options.error,
@@ -58,7 +64,7 @@ export async function chatGptBrowserErrorRetryPrompt(options: {
     );
   }
   if (options.sessionRetry) {
-    return options.sessionRetry(options.error, options.attempt);
+    return withAbort(Promise.resolve().then(() => options.sessionRetry!(options.error, options.attempt)), options.signal);
   }
   return chatGptTerminalErrorRetryPrompt(
     options.error,
