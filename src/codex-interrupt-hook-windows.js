@@ -139,11 +139,16 @@
 
     stage("http_begin");
     var request = new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
+    stage("http_constructed");
     request.setProxy(1);
+    stage("http_proxy_set");
     request.setTimeouts(250, 250, 250, 250);
+    stage("http_timeouts_set");
     request.open("POST", "http://127.0.0.1:" + port + "/admin/interrupt-turn", false);
+    stage("http_opened");
     request.setRequestHeader("authorization", "Bearer " + token);
     request.setRequestHeader("content-type", "application/json");
+    stage("http_headers_set");
     request.send('{"threadId":"' + threadId + '","turnId":"' + turnId + '"}');
     stage("http_returned");
     if (request.status < 200 || request.status >= 300) throw new Error("request failed");

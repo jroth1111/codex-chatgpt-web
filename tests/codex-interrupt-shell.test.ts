@@ -48,14 +48,15 @@ test.skipIf(process.platform !== "win32")("Interrupt hook reaches the exact auth
     }).finally(() => clearTimeout(timer));
     child.stdin.destroy();
     error = error.split(/\r?\n/).filter(line => {
-      if (/^\[interrupt-hook-stage\] (stdin_begin|stdin_complete|config_begin|config_complete|http_begin|http_returned|acknowledged)$/.test(line)) {
+      if (/^\[interrupt-hook-stage\] (stdin_begin|stdin_complete|config_begin|config_complete|http_begin|http_constructed|http_proxy_set|http_timeouts_set|http_opened|http_headers_set|http_returned|acknowledged)$/.test(line)) {
         stages.push(line.slice("[interrupt-hook-stage] ".length));
         return false;
       }
       return true;
     }).join("\r\n");
     if (status === 0) expect(stages).toEqual([
-      "stdin_begin", "stdin_complete", "config_begin", "config_complete", "http_begin", "http_returned", "acknowledged",
+      "stdin_begin", "stdin_complete", "config_begin", "config_complete", "http_begin", "http_constructed",
+      "http_proxy_set", "http_timeouts_set", "http_opened", "http_headers_set", "http_returned", "acknowledged",
     ]);
     return { shell, status, output, error };
   };
