@@ -2159,7 +2159,10 @@ export class ChatGptModelReceiptObserver {
       candidate.on("request", this.onRequest);
       candidate.on("requestfailed", this.onRequestFailed);
       pageListenersRegistered = true;
-      await this.ensurePageCaptureReady();
+      // The optional page tee has its own bounded readiness budget. Do not let
+      // that fallback invalidate a healthy CDP setup through the outer attach
+      // timer; callers already check page readiness independently before Send.
+      void this.ensurePageCaptureReady().catch(error => noteTelemetryFailure("page-ready", error));
       if (stale()) { await cleanup(); return false; }
       return true;
     } catch (error) {

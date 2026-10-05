@@ -716,6 +716,30 @@ test("a hung CDP attach is bounded and a late session is detached without reacti
   await observer.dispose();
 });
 
+test("slow optional page capture cannot invalidate an already healthy CDP attachment", async () => {
+  const page = new FakePage();
+  const receipts: unknown[] = [];
+  const observer = new ChatGptModelReceiptObserver("trace_page_capture_delay", "chatgpt-web/gpt-6-pro", undefined,
+    value => receipts.push(value));
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  observer.ensurePageCaptureReady = () => gate;
+  try {
+    await observer.attach(page as never);
+    observer.beginSend({ responseAttempt: 1 }); observer.activate();
+    const request = new FakeRequest(page, { model: "gpt-6-pro" });
+    page.emit("request", request);
+    page.cdp.emit("Network.requestWillBeSent", { requestId: "page-delay", frameId: "main",
+      request: { method: "POST", url: request.url(), postData: request.postData() } });
+    release();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(page.cdp.detached).not.toBeTrue();
+    emitNetworkResponse(page, "page-delay", resolvedSse("gpt-6-pro"));
+    await observer.flushCurrent();
+    expect(receipts).toHaveLength(1);
+  } finally { release(); await observer.dispose(); }
+});
+
 test("collector rejection is telemetry-only and does not reject the transport observer", async () => {
   const page = new FakePage();
   const diagnostics: any[] = [];
