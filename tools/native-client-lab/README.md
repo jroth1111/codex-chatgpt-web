@@ -6,6 +6,13 @@ From this directory, run `node --test tests/*.test.mjs` for offline tests. Bun i
 
 With a ready, signed-in bridge whose health/config/source versions agree:
 
+The default is GPT-6 Pro. To test 5.6 Pro explicitly, prefix the entire launcher
+or benchmark invocation with `ASTRA6_PRO_FAMILY=5.6`. Only `6` and `5.6` are
+accepted. This pins the native client, one-row catalog, recording proxy and
+served-model oracle to the chosen family; it never falls back automatically.
+5.6 results must not be reported as GPT-6 acceptance. Default GPT-6 runs still
+require `gpt-6-pro` on every owned physical Send.
+
 ```sh
 node bin/codex-astrapro.mjs --headless --diagnostic --cwd /absolute/disposable/project --prompt-file /absolute/task.txt
 node bin/claude-astrapro.mjs --headless --diagnostic --cwd /absolute/disposable/project --prompt-file /absolute/task.txt

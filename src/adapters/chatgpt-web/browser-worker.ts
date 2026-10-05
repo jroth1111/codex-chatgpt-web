@@ -1679,10 +1679,14 @@ export class ChatGptBrowserWorker {
         .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error)); });
       if (uiEffortIndex > state.max - state.min) {
         const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(menu) : undefined;
-        throw chatGptModelControlUnavailableAdapterError(
-          `ChatGPT effort slider does not expose item index ${uiEffortIndex} (min=${state.min}; max=${state.max})`
-          + (uiEffortIndex === 4 ? " ChatGPT may have temporarily hidden Pro because you reached its usage limit." : ""),
-          detail,
+        throw new ChatGptWebAdapterError(
+          `${CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE} The requested ${mode.displayLabel} option is not exposed by the current picker. `
+          + "The message was not sent and no alternative model was selected. Check model availability in ChatGPT before retrying."
+          + (detail ? ` ChatGPT: ${detail}` : ""),
+          {
+            status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false,
+            cause: new Error(`ChatGPT effort slider does not expose item index ${uiEffortIndex} (min=${state.min}; max=${state.max})`),
+          },
         );
       }
       if (!state.available[uiEffortIndex]) {
@@ -5598,6 +5602,7 @@ export class ChatGptBrowserWorker {
           if (turn.tunneledOutput) throw error;
           const retryPrompt = await chatGptBrowserErrorRetryPrompt({
             error: failure,
+            signal: turn.abortSignal,
             attempt: responseAttempt,
             emittedText: answerBuffer.value(),
             compaction: turn.compaction === true,

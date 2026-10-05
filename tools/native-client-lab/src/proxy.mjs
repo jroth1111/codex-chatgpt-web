@@ -6,8 +6,8 @@ import { createHash } from 'node:crypto';
 import * as zlib from 'node:zlib';
 import { responseCapture as createResponseCapture } from './response-capture.mjs';
 
-export const CODEX_MODEL = 'chatgpt-web/gpt-6-pro';
-export const CLAUDE_MODEL = 'claude-chatgpt-web-gpt-6-pro';
+import { CODEX_MODEL, CLAUDE_MODEL, SERVED_MODEL } from './launch-args.mjs';
+export { CODEX_MODEL, CLAUDE_MODEL };
 export const CODEX_VERSION = '0.159.2';
 export const QUOTA_CODES = new Set([
   'rate_limit_exceeded',
@@ -760,7 +760,7 @@ export function createRecordingProxy(options) {
       };
       writeJson(path.join(artifactRoot, `${id}.request.json`), safeRequest, redactor);
       appendEvent(eventsPath, {
-        id, type: 'request', scope: inferenceScope ? 'gpt-6-pro-inference' : (isSteering ? 'local-control' : 'local-auxiliary'),
+        id, type: 'request', scope: inferenceScope ? `${SERVED_MODEL}-inference` : (isSteering ? 'local-control' : 'local-auxiliary'),
         method: req.method, path: req.url, model: actualModel, bytes: bodyResult.bytes.length,
         decodedBytes: bodyResult.decoded.length, contentEncoding: req.headers['content-encoding'] || 'identity',
         provenance: {
@@ -790,7 +790,7 @@ export function createRecordingProxy(options) {
       const outHeaders = safeResponseHeaders(upstream.headers, redactor);
       res.writeHead(upstream.status, outHeaders);
       appendEvent(eventsPath, {
-        id, type: 'response_start', scope: inferenceScope ? 'gpt-6-pro-inference' : (isSteering ? 'local-control' : 'local-auxiliary'),
+        id, type: 'response_start', scope: inferenceScope ? `${SERVED_MODEL}-inference` : (isSteering ? 'local-control' : 'local-auxiliary'),
         status: upstream.status, headers: outHeaders, elapsedMs: Date.now() - started,
       }, redactor);
       if (inferenceScope && (upstream.status === 429 || (options.diagnostic && upstream.status >= 500))) {
@@ -867,7 +867,7 @@ export function createRecordingProxy(options) {
         }
       }
       appendEvent(eventsPath, {
-        id, type: 'response_end', scope: inferenceScope ? 'gpt-6-pro-inference' : (isSteering ? 'local-control' : 'local-auxiliary'),
+        id, type: 'response_end', scope: inferenceScope ? `${SERVED_MODEL}-inference` : (isSteering ? 'local-control' : 'local-auxiliary'),
         status: upstream.status, responseChars, frameCount, elapsedMs: Date.now() - started,
       }, responseRedactor);
       writeJson(path.join(artifactRoot, `${id}.response.meta.json`), {

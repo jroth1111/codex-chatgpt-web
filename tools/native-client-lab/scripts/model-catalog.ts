@@ -12,8 +12,8 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-const TARGET = "chatgpt-web/gpt-6-pro";
-import { DEFAULT_SOURCE_ROOT, DEFAULT_CODEX_PATH, nativeInvocation } from "../src/launch-args.mjs";
+import { CODEX_MODEL, DEFAULT_SOURCE_ROOT, DEFAULT_CODEX_PATH, nativeInvocation } from "../src/launch-args.mjs";
+const TARGET = CODEX_MODEL;
 const DEFAULT_SOURCE = DEFAULT_SOURCE_ROOT;
 const DEFAULT_CODEX = DEFAULT_CODEX_PATH;
 

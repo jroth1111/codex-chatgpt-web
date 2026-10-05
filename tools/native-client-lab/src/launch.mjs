@@ -192,7 +192,7 @@ function generateCatalog({ output, sourceRoot, codexPath, bunPath, env, bridge }
   const rows = Array.isArray(catalog.models) ? catalog.models : [];
   if (rows.length !== 1 || rows[0]?.slug !== CODEX_MODEL || rows[0]?.default_reasoning_level !== 'max'
     || JSON.stringify(rows[0]?.supported_reasoning_levels?.map(level => level?.effort)) !== JSON.stringify(['max'])) {
-    throw new Error('Generated Codex catalog is not the exact single-row GPT-6 Pro/max catalog');
+    throw new Error(`Generated Codex catalog is not the exact single-row ${CODEX_MODEL}/max catalog`);
   }
   return catalog;
 }
@@ -288,7 +288,7 @@ export async function runLauncher(client, argv) {
   let catalog;
   let catalogPath;
   if (client === 'codex') {
-    catalogPath = options.catalog || path.join(artifactRoot, 'codex-models-gpt-6-pro.json');
+    catalogPath = options.catalog || path.join(artifactRoot, `codex-models-${CODEX_MODEL.split('/')[1]}.json`);
     if (options.catalog) {
       catalog = JSON.parse(fs.readFileSync(options.catalog, 'utf8'));
       assertExactCodexCatalog(catalog);

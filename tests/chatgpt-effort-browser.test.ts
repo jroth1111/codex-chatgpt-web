@@ -83,7 +83,11 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
         localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
       });
       if (scenario === "shrink") expect((await result).selection.label).toBe("Extra High");
-      else await expect(result).rejects.toMatchObject({ retryable: false });
+      else if (scenario === "missing-pro" || scenario === "pro-disappears") {
+        await expect(result).rejects.toMatchObject({
+          status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false,
+        });
+      } else await expect(result).rejects.toMatchObject({ retryable: false });
     }
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
     await page.close();

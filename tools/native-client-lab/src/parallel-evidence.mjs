@@ -21,7 +21,7 @@ export function parallelEvidence(log, cwd) {
       }
     }
   }
-  const served = new Set(receipts.filter(row => owned.has(row.traceId) && row.source === 'network.resolved_model_slug' && row.servedModel === 'gpt-6-pro').map(row => row.traceId));
+  const served = new Set(receipts.filter(row => owned.has(row.traceId) && row.source === 'network.resolved_model_slug' && row.servedModel === SERVED_MODEL).map(row => row.traceId));
   const observed = new Set(intervals.map(interval => interval.traceId));
   let overlap = 0;
   for (let i = 0; i < intervals.length; i++) for (let j = i + 1; j < intervals.length; j++) {
@@ -33,3 +33,4 @@ export function parallelEvidence(log, cwd) {
     observed_worker_overlap_ms: Math.max(0, overlap), overlap_evidence: 'owned_visible_generation_intervals_and_wire_receipts',
     hardware_inference_scheduling: 'unobserved' };
 }
+import { SERVED_MODEL } from './launch-args.mjs';
