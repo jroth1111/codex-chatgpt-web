@@ -19,6 +19,7 @@ export interface BrowserHelperRunMessage {
     experimentalComposerPlainText?: boolean;
   };
   turn: {
+    parallelAdmission?: import("./parallel-admission").ParallelAdmissionIdentity;
     traceId: string;
     modelId: string;
     requestedModel?: string;
