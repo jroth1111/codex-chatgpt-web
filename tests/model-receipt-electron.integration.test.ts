@@ -207,6 +207,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
       diagnostic => reboundDiagnostics.push(diagnostic as unknown as Record<string, unknown>),
     );
     await rebound.attach(page);
+    await rebound.ensurePageCaptureReady();
     rebound.beginSend({ responseAttempt: 1 });
     rebound.activate();
     const reboundFetch = await page.evaluate(async endpoint => {
@@ -281,6 +282,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
       };
     });
     await stalled.attach(page);
+    await stalled.ensurePageCaptureReady();
     stalled.beginSend({ responseAttempt: 1 });
     stalled.activate();
     const largeFetchPromise = page.evaluate(async endpoint => {
@@ -316,6 +318,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
     };
     await page.evaluate(() => { (window as typeof window & { __receiptCloneCancelled?: boolean }).__receiptCloneCancelled = false; });
     await bindingErrorObserver.attach(page);
+    await bindingErrorObserver.ensurePageCaptureReady();
     bindingErrorObserver.beginSend({ responseAttempt: 1 });
     bindingErrorObserver.activate();
     const bindingErrorFetch = await page.evaluate(async endpoint => {
@@ -344,6 +347,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
       diagnostic => splitDiagnostics.push(diagnostic as unknown as Record<string, unknown>),
     );
     await splitObserver.attach(page);
+    await splitObserver.ensurePageCaptureReady();
     splitObserver.beginSend({ responseAttempt: 1 });
     splitObserver.activate();
     const splitFetch = await page.evaluate(async endpoint => {
@@ -367,6 +371,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
       `${origin}/backend-api/f/conversation`,
     );
     await midstream.attach(page);
+    await midstream.ensurePageCaptureReady();
     midstream.beginSend({ responseAttempt: 1 });
     midstream.activate();
     const midstreamFetchPromise = page.evaluate(async endpoint => {
@@ -394,6 +399,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
       diagnostic => preactivationDiagnostics.push(diagnostic as unknown as Record<string, unknown>),
     );
     await preactivation.attach(page);
+    await preactivation.ensurePageCaptureReady();
     const preactivationEndpoint = `${origin}/backend-api/f/conversation`;
     const staleRequest = page.waitForRequest(request => request.url() === preactivationEndpoint && request.method() === "POST");
     const preactivationFetch = page.evaluate(async endpoint => {
