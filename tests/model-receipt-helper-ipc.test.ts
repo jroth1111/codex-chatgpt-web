@@ -134,6 +134,8 @@ test("real helper boundary replays run fields through worker event and daemon ca
   writeFileSync(helper, `
     import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
     ChatGptBrowserWorker.prototype.run = async function(turn) {
+      console.log("[chatgpt-web] helper-log-probe");
+      console.debug("[chatgpt-web] helper-debug-probe");
       if (turn.requestedModel !== "chatgpt-web/gpt-6-pro" || turn.backendContextModel !== "gpt-5.6-sol") {
         throw new Error("receipt route fields were not transported");
       }
