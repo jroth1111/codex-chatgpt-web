@@ -1,4 +1,5 @@
 import { digest } from './benchmark-metrics.mjs';
+import { SERVED_MODEL } from './launch-args.mjs';
 
 export function parallelEvidence(log, cwd) {
   const workflow = [], admissions = [], receipts = [];
@@ -33,4 +34,3 @@ export function parallelEvidence(log, cwd) {
     observed_worker_overlap_ms: Math.max(0, overlap), overlap_evidence: 'owned_visible_generation_intervals_and_wire_receipts',
     hardware_inference_scheduling: 'unobserved' };
 }
-import { SERVED_MODEL } from './launch-args.mjs';

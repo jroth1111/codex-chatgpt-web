@@ -209,6 +209,8 @@ export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion) 
     return value;
   };
   const rendered = replace(settings);
+  rendered.model = CLAUDE_MODEL;
+  rendered.availableModels = [CLAUDE_MODEL];
   for (const event of ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure']) {
     const matcher = rendered.hooks?.[event]?.[0];
     const hook = matcher?.hooks?.[0];

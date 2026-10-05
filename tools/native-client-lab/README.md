@@ -12,6 +12,8 @@ accepted. This pins the native client, one-row catalog, recording proxy and
 served-model oracle to the chosen family; it never falls back automatically.
 5.6 results must not be reported as GPT-6 acceptance. Default GPT-6 runs still
 require `gpt-6-pro` on every owned physical Send.
+The client alias `gpt-5.6-pro` is distinct from its empirically observed provider
+wire identifier `gpt-5-6-pro`; 5.6 receipt validation requires the latter exactly.
 
 ```sh
 node bin/codex-astrapro.mjs --headless --diagnostic --cwd /absolute/disposable/project --prompt-file /absolute/task.txt
@@ -34,3 +36,12 @@ Client tool-item counts also declare limited coverage. Prefer `returned_native_t
 Model attestation requires a consistent owned receipt for every observed physical
 Send. One resolved Pro receipt cannot cover an unidentified recovery or child Send;
 conflicting duplicate receipts also make aggregate identity unavailable.
+
+`bin/long-benchmark.mjs --client codex|claude --provider-log /private/log`
+uses a disposable, immutable 330-second command and an independent test runner.
+Pass the normal `--source-root`, `--cli-path`, `--output-root` and explicitly
+authorized `--unsafe` flags as needed. It preserves the same native child without
+a query deadline or automatic retry. Its oracle requires actual completion,
+once-only markers, filesystem timing, unchanged fixtures, native final delivery
+and the selected family's owned wire identity. A terminal failure stops the
+trial; it does not start a replacement command.

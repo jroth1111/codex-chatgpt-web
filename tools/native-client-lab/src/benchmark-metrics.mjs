@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { SERVED_MODEL } from './launch-args.mjs';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 function decodeLines(text) {
@@ -112,4 +113,3 @@ export function ownedProviderMetrics(log, cwd) {
     returned_native_tool_results: returnedTools.size, errored_native_tool_results: erroredTools.size,
     completion_committed: committed, provider_evidence: receipts.size ? 'owned_wire_receipts' : sends.size ? 'owned_wire_diagnostics_no_model_identity' : 'unavailable' };
 }
-import { SERVED_MODEL } from './launch-args.mjs';

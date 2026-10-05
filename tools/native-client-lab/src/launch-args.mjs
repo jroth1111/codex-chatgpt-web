@@ -9,9 +9,10 @@ export const CLAUDE_MIN_VERSION = [2, 1, 285];
 // Explicit invocation-only selection, never an automatic availability fallback.
 export const PRO_FAMILY = process.env.ASTRA6_PRO_FAMILY ?? '6';
 if (!['6', '5.6'].includes(PRO_FAMILY)) throw new Error('ASTRA6_PRO_FAMILY must be 6 or 5.6');
-export const SERVED_MODEL = `gpt-${PRO_FAMILY}-pro`;
-export const CODEX_MODEL = `chatgpt-web/${SERVED_MODEL}`;
-export const CLAUDE_MODEL = `claude-chatgpt-web-${SERVED_MODEL}`;
+// The owned 5.6 provider response uses a hyphenated version, unlike client aliases.
+export const SERVED_MODEL = `gpt-${PRO_FAMILY === '5.6' ? '5-6' : PRO_FAMILY}-pro`;
+export const CODEX_MODEL = `chatgpt-web/gpt-${PRO_FAMILY}-pro`;
+export const CLAUDE_MODEL = `claude-chatgpt-web-gpt-${PRO_FAMILY}-pro`;
 export function executableOnPath(name) {
   for (const directory of (process.env.PATH || '').split(path.delimiter)) {
     for (const suffix of process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']) {
