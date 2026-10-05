@@ -2,8 +2,8 @@
   {
     "path": "tests/browser-worker-contract.test.ts",
     "baselineSha256": "0111862276e04f85a8d4c7f2b054f6702a434869b2eec089b587a77c00ea30f4",
-    "currentSha256": "cafc47f52d79a7db93db2f105a5eac3757851ff852f9b2ccfce884ebaf220ad3",
-    "reason": "PR 75: owned Pro persistence and corrected lifecycle race coverage"
+    "currentSha256": "07fc32bd5c28708072d5fafa01040c0299294e55b3bd9d3202b5613e1b10fba6",
+    "reason": "PRs 74 and 75: combined receipt observer, Pro persistence and lifecycle regression coverage"
   },
   {
     "path": "tests/chatgpt-web-harness.test.ts",
