@@ -46,7 +46,11 @@ try {
   fs.closeSync(fd);
   for (const [signal, handler] of handlers) process.off(signal, handler);
 }
-const test = spawnSync(process.execPath, ['--test', 'long.test.mjs'], { cwd, encoding: 'utf8' });
+let nativeTestMarker;
+try { nativeTestMarker = JSON.parse(fs.readFileSync(path.join(cwd, 'native-test-complete.json'))); } catch { nativeTestMarker = null; }
+const nativeTestObserved = nativeTestMarker?.passed === true && Number.isSafeInteger(nativeTestMarker.pid) && nativeTestMarker.pid > 0;
+const test = spawnSync(process.execPath, ['--test', 'long.test.mjs'], { cwd, encoding: 'utf8',
+  env: { ...process.env, NATIVE_LAB_INDEPENDENT_TEST: '1' } });
 fs.writeFileSync(path.join(root, 'independent-test.log'), test.stdout + test.stderr, { mode: 0o600 });
 const dirs = fs.existsSync(artifacts) ? fs.readdirSync(artifacts) : [];
 const native = dirs.length === 1 ? nativeMetrics(path.join(artifacts, dirs[0])) : { native_exit: null, client_final_observed: false };
@@ -59,7 +63,8 @@ let done;
 try { done = JSON.parse(fs.readFileSync(path.join(cwd, 'done.json'))); } catch { done = null; }
 const result = { client, elapsed_ms: Date.now() - started, launcher_exit: exit,
   independent_test_exit: test.status, fixtures_unchanged: immutable, command_completion: done,
-  ...native, ...wire, ...acceptance, billing_cost: null };
+  ...native, ...wire, ...acceptance, native_test_observed: nativeTestObserved,
+  accepted: acceptance.accepted && nativeTestObserved, billing_cost: null };
 fs.writeFileSync(path.join(root, 'results.json'), JSON.stringify(result, null, 2), { mode: 0o600 });
 console.log(JSON.stringify(result));
-process.exitCode = acceptance.accepted ? 0 : 1;
+process.exitCode = result.accepted ? 0 : 1;

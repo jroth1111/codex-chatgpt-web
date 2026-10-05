@@ -62,3 +62,12 @@ requires one inference request, native exit 0 and the exact recorded final.
 The lab scrubs Herdr pane markers from child environments so a PATH shim cannot
 silently invoke another provider launcher and rewrite the explicitly owned
 route/retry settings. Global Herdr, client and bridge configuration are unchanged.
+
+New Claude sessions use separate profiles/settings keyed by the native session
+UUID. A known resume reuses its original profile; unknown IDs fail before new
+inference. Existing legacy transcripts use the old shared profile for compatibility
+and should not be resumed concurrently. `--parallel-agents` also pins native
+Claude spawn depth to one for this invocation and its settings, not globally.
+The long-command oracle requires a client-generated test marker before the
+independent host runner executes; a correct command artifact plus host tests
+cannot hide a client that never ran its requested verification.

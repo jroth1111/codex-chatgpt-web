@@ -1,4 +1,4 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,7 +6,24 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import * as zlib from 'node:zlib';
-import { createRecordingProxy, CODEX_MODEL, QUOTA_CODES } from '../src/proxy.mjs';
+import { createRecordingProxy as createProxy, CODEX_MODEL, QUOTA_CODES } from '../src/proxy.mjs';
+
+const ownedProxies = new Set(), ownedServers = new Set();
+function createRecordingProxy(options) { const proxy = createProxy(options); ownedProxies.add(proxy); return proxy; }
+function test(name, options, body) {
+  if (typeof options === 'function') { body = options; options = {}; }
+  return nodeTest(name, { ...options, timeout: Math.min(options?.timeout ?? 15000, 15000) }, async t => {
+    process.stderr.write(`[proxy-fixture] start ${name}\n`);
+    t.after(async () => {
+      await Promise.all([...ownedProxies].map(proxy => proxy.close())); ownedProxies.clear();
+      await Promise.all([...ownedServers].map(server => new Promise(resolve => {
+        server.close(resolve); server.closeIdleConnections?.(); server.closeAllConnections?.();
+      }))); ownedServers.clear();
+      process.stderr.write(`[proxy-fixture] settled ${name}\n`);
+    });
+    return body(t);
+  });
+}
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'astra6-proxy-test-'));
@@ -85,6 +102,7 @@ async function startFixture(responseBody, { status = 200, onRequest, responseHea
     } else res.end(produced);
   });
   const port = await serverListen(upstream);
+  ownedServers.add(upstream);
   return { upstream, port, seen };
 }
 

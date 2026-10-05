@@ -80,6 +80,44 @@ reproduced a fixture teardown hang. Teardown now closes only owned fixture socke
 the regression passes without widening CI limits or production query deadlines.
 Recorded SSE byte hashes are protected with LF attributes for Windows checkouts.
 
+## Modern long-tool boundary
+
+A later Claude long run was initially scored accepted by the old harness because
+the command and the independent host test succeeded. Its actual native final
+reported failure to retrieve output or run the client test due to 502s. That
+score is explicitly invalidated; it is not an accepted client workflow.
+The following Codex trial also failed before executing a command on that poisoned
+tunnel. No failed or unknown-outcome command was replayed.
+
+Captured Claude 2.1.286 tools include Bash.run_in_background and Read, but no
+TaskOutput and no advertised Bash timeout default. The old normalizer therefore
+left an unspecified native foreground wait intact (observed 120 seconds), after
+which tunnel initialize/tool calls failed internally. The normalizer now hands
+off unspecified or long waits when either TaskOutput or Read completion is
+advertised. It preserves command bytes and explicit lifetime; it does not invent
+a timeout default or fabricate completion. Catalogs with no completion reader
+still do not get this transformation.
+
+With the repair, the real Claude long trial passed in 443409 ms: command elapsed
+330004 ms exactly once, immutable fixtures, an actual native test-completion
+marker observed before independent verification, independent runner exit 0,
+native final delivery, nine returned native results, one physical owned
+gpt-5-6-pro Send and zero recovery. The strengthened oracle requires that marker;
+the independent host's test alone can no longer accept missing client verification.
+
+New lab Claude sessions have per-session settings/profile paths to prevent
+another launch overwriting live hook URLs or model settings. Known legacy
+transcripts remain resumable; unknown resume IDs fail instead of silently starting
+empty replacement work. Legacy shared-profile resumes remain legacy behavior,
+not a claim of concurrent legacy-profile isolation. Parallel lab invocations pin
+the supported native Claude spawn depth to one; generic bridge-side Claude
+nesting prevention is still not claimed without native metadata.
+
+The next hosted lab run passed macOS but stalled on Windows in the proxy test file.
+Fixtures now log each test start/settlement, have bounded diagnostic test deadlines
+without widening existing deadlines, and clean only their owned sockets after
+each test. This is instrumentation and fixture cleanup, not a Pro query timeout.
+
 An actual disposable broker process was killed after independently observed
 counter mutation and before result delivery. A fresh process rejected the old
 operation handle and dispatch authority; counter stayed 1. This verifies the

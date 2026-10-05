@@ -194,6 +194,9 @@ test('constructed child environments disable Claude background traffic and scrub
   assert.equal(claude.HERDR_ENV, undefined);
   assert.equal(claude.HERDR_PANE_ID, undefined);
   assert.equal(base.HERDR_ENV, 'inherited-pane');
+  assert.equal(claude.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, undefined);
+  const parallelClaude = cleanEnvironment(base, 'claude', 'child-token', 'control-token', 'http://127.0.0.1:1', '/lab/runtime/claude', { parallelAgents: true });
+  assert.equal(parallelClaude.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, '1');
   assert.equal(claude.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL, '1');
   assert.equal(claude.DISABLE_AUTOUPDATER, '1');
   assert.equal(claude.CODEX_CHATGPT_WEB_CONTROL_TOKEN, 'control-token');

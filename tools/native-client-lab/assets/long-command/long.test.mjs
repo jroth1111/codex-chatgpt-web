@@ -11,4 +11,7 @@ test('the real command started exactly once and completed after more than five m
   assert.ok(done.elapsed_ms >= 330_000);
   assert.ok(Date.now() - started.started >= 330_000);
   assert.ok(fs.statSync('done.json').mtimeMs - fs.statSync('started.json').mtimeMs >= 329_500);
+  if (process.env.NATIVE_LAB_INDEPENDENT_TEST !== '1') {
+    fs.writeFileSync('native-test-complete.json', JSON.stringify({ pid: process.pid, passed: true }), { flag: 'wx' });
+  }
 });

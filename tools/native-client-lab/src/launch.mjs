@@ -13,6 +13,7 @@ import {
   assertDirectory,
   assertExecutable,
   assertExactCodexCatalog,
+  assertUuid,
   buildClaudeArgs,
   buildCodexArgs,
   canonicalCodexHome,
@@ -39,7 +40,7 @@ function writePrivate(file, data, flag = 'w') {
   try { fs.chmodSync(file, 0o600); } catch {}
 }
 
-export function cleanEnvironment(base, client, childToken, controlToken, proxyUrl, configDir, { headless = false } = {}) {
+export function cleanEnvironment(base, client, childToken, controlToken, proxyUrl, configDir, { headless = false, parallelAgents = false } = {}) {
   const env = { ...base };
   for (const key of Object.keys(env)) if (SENSITIVE_ENV.test(key)) delete env[key];
   delete env.NODE_OPTIONS;
@@ -68,6 +69,7 @@ export function cleanEnvironment(base, client, childToken, controlToken, proxyUr
     env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1';
     env.API_TIMEOUT_MS = '2147483647';
     env.CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES = '0';
+    if (parallelAgents) env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = '1';
     // Claude's documented child-only switches avoid background traffic, marketplace installation,
     // and updater work for this disposable invocation. They do not change global settings or
     // security updates outside this child; steering HTTP hooks remain enabled.
@@ -203,7 +205,7 @@ function generateCatalog({ output, sourceRoot, codexPath, bunPath, env, bridge }
   return catalog;
 }
 
-export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion) {
+export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion, { parallelAgents = false } = {}) {
   ensureDir(configDir);
   const templatePath = path.resolve(LAUNCH_DIR, '..', 'assets', 'claude-settings.template.json');
   const settings = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
@@ -218,6 +220,7 @@ export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion) 
   rendered.model = CLAUDE_MODEL;
   rendered.availableModels = [CLAUDE_MODEL];
   rendered.env = { ...(rendered.env || {}), API_TIMEOUT_MS: '2147483647', CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: '0' };
+  if (parallelAgents) rendered.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = '1';
   for (const event of ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure']) {
     const matcher = rendered.hooks?.[event]?.[0];
     const hook = matcher?.hooks?.[0];
@@ -228,6 +231,20 @@ export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion) 
   const settingsPath = path.join(configDir, 'settings.json');
   writePrivate(settingsPath, encoded);
   return settingsPath;
+}
+
+export function claudeConfigDirectory(sessionId, { resume = false, labRoot = path.resolve(LAUNCH_DIR, '..') } = {}) {
+  const id = assertUuid(sessionId, 'Claude session id');
+  const legacy = path.join(labRoot, 'runtime', 'claude');
+  const isolated = path.join(legacy, 'sessions', id);
+  if (!resume || fs.existsSync(isolated)) return isolated;
+  // Preserve existing legacy transcripts without copying credentials/settings
+  // or silently starting an empty replacement for an unknown resume id.
+  const projects = path.join(legacy, 'projects');
+  const found = fs.existsSync(projects) && fs.readdirSync(projects, { withFileTypes: true })
+    .some(entry => entry.isDirectory() && fs.existsSync(path.join(projects, entry.name, `${id}.jsonl`)));
+  if (found) return legacy;
+  throw new Error('Claude resume profile is unknown; locate the original owned lab session instead of starting replacement work');
 }
 
 function writeLaunchMetadata(file, value) {
@@ -290,8 +307,11 @@ export async function runLauncher(client, argv) {
   // fails before spawn, an unref'ed listener cannot leave a zombie launcher behind.
   proxy.server.unref();
   const proxyUrl = endpoint.url;
+  const configDir = client === 'claude'
+    ? claudeConfigDirectory(proxy.state.sessionId, { resume: Boolean(options.resume) })
+    : path.join(path.resolve(LAUNCH_DIR, '..', 'runtime', 'claude'));
   const env = cleanEnvironment(process.env, client, childToken, bridge.controlToken, proxyUrl,
-    path.join(path.resolve(LAUNCH_DIR, '..', 'runtime', 'claude')), { headless: options.headless });
+    configDir, { headless: options.headless, parallelAgents: options.parallelAgents });
   const clientVersion = nativeVersion(cliPath, client, env);
   proxy.setClientVersion(clientVersion);
   let catalog;
@@ -305,9 +325,8 @@ export async function runLauncher(client, argv) {
       catalog = generateCatalog({ output: catalogPath, sourceRoot: options.sourceRoot, codexPath: cliPath, bunPath: options.bunPath, env, bridge });
     }
   }
-  const configDir = path.join(path.resolve(LAUNCH_DIR, '..', 'runtime', 'claude'));
   let settingsPath;
-  if (client === 'claude') settingsPath = writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion);
+  if (client === 'claude') settingsPath = writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion, { parallelAgents: options.parallelAgents });
   const args = client === 'codex'
     ? buildCodexArgs({ cwd: options.cwd, resume: options.resume, proxyUrl, catalogPath, catalog, unsafe: options.unsafe, headless: options.headless, parallelAgents: options.parallelAgents, extraArgs: options.extraArgs })
     : buildClaudeArgs({ cwd: options.cwd, resume: options.resume, sessionId: proxy.state.sessionId, settingsPath, emptyMcpPath: DEFAULT_EMPTY_MCP, unsafe: options.unsafe, headless: options.headless, extraArgs: options.extraArgs }).args;
