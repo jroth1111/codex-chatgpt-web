@@ -43,6 +43,10 @@ export function cleanEnvironment(base, client, childToken, controlToken, proxyUr
   const env = { ...base };
   for (const key of Object.keys(env)) if (SENSITIVE_ENV.test(key)) delete env[key];
   delete env.NODE_OPTIONS;
+  // Herdr's PATH shim otherwise invokes an interactive provider launcher that
+  // can rewrite this lab's explicitly owned route/retry environment.
+  delete env.HERDR_ENV;
+  delete env.HERDR_PANE_ID;
   delete env.CODEX_WEB_TEST_TOKEN;
   delete env.ASTRA6_CODEX_CHILD_TOKEN;
   delete env.OPENAI_PROJECT;
@@ -62,6 +66,8 @@ export function cleanEnvironment(base, client, childToken, controlToken, proxyUr
     env.ANTHROPIC_AUTH_TOKEN = childToken;
     env.CLAUDE_CONFIG_DIR = configDir;
     env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1';
+    env.API_TIMEOUT_MS = '2147483647';
+    env.CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES = '0';
     // Claude's documented child-only switches avoid background traffic, marketplace installation,
     // and updater work for this disposable invocation. They do not change global settings or
     // security updates outside this child; steering HTTP hooks remain enabled.
@@ -211,6 +217,7 @@ export function writeClaudeSettings(configDir, bridge, proxyUrl, clientVersion) 
   const rendered = replace(settings);
   rendered.model = CLAUDE_MODEL;
   rendered.availableModels = [CLAUDE_MODEL];
+  rendered.env = { ...(rendered.env || {}), API_TIMEOUT_MS: '2147483647', CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: '0' };
   for (const event of ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure']) {
     const matcher = rendered.hooks?.[event]?.[0];
     const hook = matcher?.hooks?.[0];

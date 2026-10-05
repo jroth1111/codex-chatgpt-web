@@ -46,8 +46,39 @@ are retained separately.
 
 Codex's fresh long-command trial passed: actual command 330011 ms, exactly one
 execution, immutable fixtures, independent test exit 0, native final delivery,
-one owned 5.6 Pro Send and no recovery. Claude's corresponding provider turn is
-still in flight; active generation is preserved, not subjected to a query timer.
+one owned 5.6 Pro Send and no recovery. Claude's first corresponding trial failed
+final delivery after 2020304 ms: the command completed once after 330005 ms, but
+the client repeatedly hit its API timer. Its failure is preserved. A subsequent
+trial reported Native2 upstream 502 failures, performed no command and failed
+the independent test despite native exit 0. Neither trial counts as acceptance.
+
+The native Claude SDK now gets its documented maximum API timer, 2147483647 ms,
+and zero non-streaming timeout re-sends, both in the lab and reversible managed
+integration. This finite native limit is about 24.8 days, not a truly unlimited
+client lifetime. The bridge itself remains deadline-free. Existing transport
+watchdogs remain enabled. The actual native SDK passed a separate 615677 ms
+recorded-wire delay control: one inference request, 20 ping frames, exact recorded
+final and native exit 0. That is NOT provider, model identity or editing proof.
+Settings restoration is independently tested against original user timer values.
+
+Inherited Herdr pane markers were activating a PATH shim's interactive launcher;
+lab children now scrub those markers, and repaired trials explicitly use the
+real native Claude binary. No global Herdr/client settings were changed.
+
+The tunnel advertised ready despite logged client-internal initialize/tools-call
+502 failures with upstream_response_received=false. A direct owned, read-only
+MCP probe initialized, listed seven tools and returned the actual broker inventory
+without executing a command. Only the idle owned alias was reconnected; no browser
+generation was stopped. Fresh Codex/Claude basic trials then passed in 102455 and
+101295 ms respectively, each with exact edit, unchanged tests, independent exit 0,
+final delivery, one owned 5.6 Pro Send and no recovery. Do not equate local tunnel
+ready flags or static plugin catalogs with a working provider-to-tool round trip.
+
+The hosted lab's macOS lane was cancelled at its existing five-minute job limit
+while the proxy test file was unfinished. A real held peer stream independently
+reproduced a fixture teardown hang. Teardown now closes only owned fixture sockets;
+the regression passes without widening CI limits or production query deadlines.
+Recorded SSE byte hashes are protected with LF attributes for Windows checkouts.
 
 An actual disposable broker process was killed after independently observed
 counter mutation and before result delivery. A fresh process rejected the old

@@ -185,9 +185,15 @@ test('constructed child environments disable Claude background traffic and scrub
     OTEL_EXPORTER_OTLP_HEADERS: 'authorization=should-not-inherit',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '0',
     DISABLE_AUTOUPDATER: '0',
+    HERDR_ENV: 'inherited-pane', HERDR_PANE_ID: 'inherited-pane-id',
   };
   const claude = cleanEnvironment(base, 'claude', 'child-token', 'control-token', 'http://127.0.0.1:1', '/lab/runtime/claude');
   assert.equal(claude.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
+  assert.equal(claude.API_TIMEOUT_MS, '2147483647');
+  assert.equal(claude.CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES, '0');
+  assert.equal(claude.HERDR_ENV, undefined);
+  assert.equal(claude.HERDR_PANE_ID, undefined);
+  assert.equal(base.HERDR_ENV, 'inherited-pane');
   assert.equal(claude.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL, '1');
   assert.equal(claude.DISABLE_AUTOUPDATER, '1');
   assert.equal(claude.CODEX_CHATGPT_WEB_CONTROL_TOKEN, 'control-token');

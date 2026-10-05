@@ -136,6 +136,11 @@ function desired(config: AppConfig): ClaudeIntegrationJournal["installed"] {
       ANTHROPIC_BASE_URL: `http://${config.host}:${config.port}`,
       ANTHROPIC_AUTH_TOKEN: "codex-chatgpt-web-local",
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+      // Claude otherwise bounds a whole API request to ten minutes, even
+      // when this bridge is still serving a healthy, slow Pro generation.
+      // This is its documented signed-32-bit timer ceiling, not Infinity.
+      API_TIMEOUT_MS: "2147483647",
+      CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: "0",
       CODEX_CHATGPT_WEB_CONTROL_TOKEN: config.controlToken,
     },
     hook: {

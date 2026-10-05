@@ -18,13 +18,13 @@ const catalog={models:[{slug:CODEX_MODEL,default_reasoning_level:'max',supported
 assertExactCodexCatalog(catalog);
 let rejected=false;
 try{assertExactCodexCatalog({models:[{...catalog.models[0],slug:'chatgpt-web/gpt-6-pro'}]});}catch{rejected=true;}
-console.log(JSON.stringify({CODEX_MODEL,CLAUDE_MODEL,SERVED_MODEL,proxyModel,rejected,settingsModel:settings.model,availableModels:settings.availableModels,
+console.log(JSON.stringify({CODEX_MODEL,CLAUDE_MODEL,SERVED_MODEL,proxyModel,rejected,settingsModel:settings.model,availableModels:settings.availableModels,timeout:settings.env.API_TIMEOUT_MS,
 accepted:evaluateAcceptance({...workflow,servedModel:SERVED_MODEL}).accepted,
 wrong:evaluateAcceptance({...workflow,servedModel:'gpt-6-pro'}).accepted}));`;
 test('explicit 5.6 selection pins client, catalog, proxy and exact served identity without fallback',()=>{
   const result=spawnSync(process.execPath,['--input-type=module','-e',code],{cwd,encoding:'utf8',env:{...process.env,ASTRA6_PRO_FAMILY:'5.6'}});
   assert.equal(result.status,0,result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout),{CODEX_MODEL:'chatgpt-web/gpt-5.6-pro',CLAUDE_MODEL:'claude-chatgpt-web-gpt-5.6-pro',SERVED_MODEL:'gpt-5-6-pro',proxyModel:'chatgpt-web/gpt-5.6-pro',rejected:true,settingsModel:'claude-chatgpt-web-gpt-5.6-pro',availableModels:['claude-chatgpt-web-gpt-5.6-pro'],accepted:true,wrong:false});
+  assert.deepEqual(JSON.parse(result.stdout),{CODEX_MODEL:'chatgpt-web/gpt-5.6-pro',CLAUDE_MODEL:'claude-chatgpt-web-gpt-5.6-pro',SERVED_MODEL:'gpt-5-6-pro',proxyModel:'chatgpt-web/gpt-5.6-pro',rejected:true,settingsModel:'claude-chatgpt-web-gpt-5.6-pro',availableModels:['claude-chatgpt-web-gpt-5.6-pro'],timeout:'2147483647',accepted:true,wrong:false});
 });
 test('unknown model families fail before any client can launch',()=>{
   const result=spawnSync(process.execPath,['--input-type=module','-e',code],{cwd,encoding:'utf8',env:{...process.env,ASTRA6_PRO_FAMILY:'7'}});

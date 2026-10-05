@@ -90,8 +90,27 @@ async function startFixture(responseBody, { status = 200, onRequest, responseHea
 
 async function stop(proxy, upstream) {
   await proxy.close();
-  await new Promise(resolve => upstream.close(() => resolve()));
+  const closed = new Promise(resolve => upstream.close(() => resolve()));
+  // This is teardown of an owned recording fixture, not a provider deadline.
+  // server.close alone waits forever for a deliberately unfinished peer stream.
+  upstream.closeIdleConnections?.();
+  upstream.closeAllConnections?.();
+  await closed;
 }
+
+test('fixture cleanup closes an actual unfinished peer stream rather than hanging the test process', async () => {
+  const upstream = http.createServer((_req, res) => { res.writeHead(200); res.write('owned-held-fixture'); });
+  const port = await serverListen(upstream);
+  const req = http.get(`http://127.0.0.1:${port}`);
+  req.on('error', () => {});
+  let timer;
+  try {
+    await new Promise((resolve, reject) => { req.once('response', res => { res.on('error', () => {}); res.resume(); resolve(); }); req.once('error', reject); });
+    await Promise.race([stop({ close: async () => {} }, upstream), new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Owned fixture peer prevented teardown')), 1000);
+    })]);
+  } finally { clearTimeout(timer); req.destroy(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); }
+});
 
 test('explicit parallel harness admits only current owned flat native descendants', async t => {
   const fixture = await startFixture('data: [DONE]\n\n');

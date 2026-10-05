@@ -45,3 +45,20 @@ a query deadline or automatic retry. Its oracle requires actual completion,
 once-only markers, filesystem timing, unchanged fixtures, native final delivery
 and the selected family's owned wire identity. A terminal failure stops the
 trial; it does not start a replacement command.
+
+Claude's API request timer otherwise defaults to ten minutes. Lab invocations
+and reversible managed integration use its documented maximum `2147483647`
+milliseconds (about 24.8 days), never an overflowing larger value or `Infinity`.
+That native SDK limit is finite; only the bridge itself has no query deadline.
+Non-streaming timeout re-sends are disabled. Transport watchdogs remain intact;
+normal SSE pings are keepalives, not claimed provider progress.
+See [Claude's environment reference](https://code.claude.com/docs/en/env-vars).
+
+`ASTRA6_PRO_FAMILY=5.6 node bin/slow-client-replay.mjs --cli-path /absolute/native/claude`
+is a separate real-client latency control: it replays the hashed actual
+client-facing final recording after 615 seconds with keepalives. It is NOT live
+provider inference, model identity, editing or task acceptance evidence. It
+requires one inference request, native exit 0 and the exact recorded final.
+The lab scrubs Herdr pane markers from child environments so a PATH shim cannot
+silently invoke another provider launcher and rewrite the explicitly owned
+route/retry settings. Global Herdr, client and bridge configuration are unchanged.
