@@ -36,6 +36,9 @@ test.skipIf(!existsSync(CHROME_PATH))("real Chromium CDP transport captures head
   const startedAt = Date.now();
   const phases: Array<{ phase: string; elapsedMs: number }> = [];
   const mark = (phase: string) => phases.push({ phase, elapsedMs: Date.now() - startedAt });
+  let settleStream!: () => void;
+  const streamSettled = new Promise<void>(resolve => { settleStream = resolve; });
+  let tailGuard: ReturnType<typeof setTimeout> | undefined;
   const server = createServer((request, response) => {
     if (request.method === "GET") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -64,12 +67,15 @@ test.skipIf(!existsSync(CHROME_PATH))("real Chromium CDP transport captures head
     setTimeout(() => {
       mark("first_chunk");
       response.write(frame.slice(0, Math.floor(frame.length / 2)));
-      // The provider fixture must finish independently of telemetry readiness.
-      // Otherwise a legitimate best-effort attach refusal deadlocks this test.
-      setTimeout(() => {
+      // Do not race a real CDP enable command against an arbitrary 250ms tail.
+      // A finite fixture-only guard still ends the response on attach refusal;
+      // it cannot make a failed stream assertion pass or bound provider work.
+      tailGuard = setTimeout(settleStream, 10_000);
+      void streamSettled.then(() => {
+        if (tailGuard) clearTimeout(tailGuard);
         response.write(frame.slice(Math.floor(frame.length / 2)));
         response.end();
-      }, 250);
+      });
     }, 2_100);
   });
   server.listen(0, "127.0.0.1");
@@ -105,7 +111,7 @@ test.skipIf(!existsSync(CHROME_PATH))("real Chromium CDP transport captures head
       if (method === "Network.streamResourceContent") {
         mark("observer_stream_enable_started");
         streamCommands++;
-        streamCommand = pending.then(() => { mark("observer_stream_enable_completed"); streamCommandResolved = true; }, () => { mark("observer_stream_enable_failed"); });
+        streamCommand = pending.then(() => { mark("observer_stream_enable_completed"); streamCommandResolved = true; settleStream(); }, () => { mark("observer_stream_enable_failed"); settleStream(); });
       }
       return pending;
     };
@@ -149,6 +155,7 @@ test.skipIf(!existsSync(CHROME_PATH))("real Chromium CDP transport captures head
     mark("browser_body_complete");
     await observer.flushCurrent();
     await observer.dispose();
+    if (!streamCommandResolved || receipts.length !== 1) console.info("[offline-cdp-receipt-failure]", JSON.stringify({ phases, streamCommands, diagnostics }));
     expect(result.status).toBe(200);
     expect(result.body).toContain("resolved_model_slug");
     expect(streamCommandResolved).toBeTrue();
@@ -164,6 +171,8 @@ test.skipIf(!existsSync(CHROME_PATH))("real Chromium CDP transport captures head
     expect(receipts[0]).toHaveProperty("messageIdHash");
     expect(receipts[0]).not.toHaveProperty("messageId", FIXTURE.assistantMessageId);
   } finally {
+    settleStream();
+    if (tailGuard) clearTimeout(tailGuard);
     sessionFactory.mockRestore();
     await observer.dispose().catch(() => {});
     await probe.detach().catch(() => {});
