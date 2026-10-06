@@ -69,6 +69,19 @@ export async function callTurnBroker<T>(
       trace(response.error ? "reply_error" : "reply_result");
       clearTimeout(timer);
       cleanup();
+      // Retire only this completed RPC, never the running turn/native work.
+      // Unref now and gracefully half-close outside the native data callback;
+      // successful Windows/Bun pipes must not race force-destroy against EOF.
+      // Bun's Windows named-pipe unref races native close callbacks. Graceful
+      // end below owns retirement there; other runtimes can drop the ref now.
+      if (!(process.platform === "win32" && process.versions.bun)) socket.unref();
+      const retire = () => {
+        if (!socket.destroyed && !socket.writableEnded && !socket.readableEnded) socket.end();
+      };
+      // Completed-response grace only: let Bun Windows deliver queued native
+      // EOF/close callbacks before touching a still-open named pipe.
+      if (process.platform === "win32" && process.versions.bun) setTimeout(retire, 50);
+      else setImmediate(retire);
       if (response.error) rejectCall(new Error(response.error));
       else resolveCall(response.result as T);
     };
@@ -89,7 +102,7 @@ export async function callTurnBroker<T>(
     socket.once("end", () => {
       trace("peer_end");
       if (response) responseAccepted = true;
-      socket.end();
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
       setImmediate(finishResponse);
     });
     socket.once("close", () => {
@@ -131,9 +144,6 @@ export async function callTurnBroker<T>(
       // Waiting for peer EOF afterward can hang Windows named pipes forever:
       // responseAccepted has already disabled timeout/cancellation settlement.
       finishResponse();
-      // The server owns normal socket closure after its response. Force-close
-      // races Bun's Windows pipe end path even when deferred. Settlement is
-      // independent of EOF; failed/cancelled requests still retire their socket.
     });
   });
 }
