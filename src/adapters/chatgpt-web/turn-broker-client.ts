@@ -75,9 +75,13 @@ export async function callTurnBroker<T>(
       // Bun's Windows named-pipe unref races native close callbacks. Graceful
       // end below owns retirement there; other runtimes can drop the ref now.
       if (!(process.platform === "win32" && process.versions.bun)) socket.unref();
-      setImmediate(() => {
+      const retire = () => {
         if (!socket.destroyed && !socket.writableEnded && !socket.readableEnded) socket.end();
-      });
+      };
+      // Completed-response grace only: let Bun Windows deliver queued native
+      // EOF/close callbacks before touching a still-open named pipe.
+      if (process.platform === "win32" && process.versions.bun) setTimeout(retire, 50);
+      else setImmediate(retire);
       if (response.error) rejectCall(new Error(response.error));
       else resolveCall(response.result as T);
     };
