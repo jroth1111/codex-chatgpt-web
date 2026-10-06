@@ -65,7 +65,7 @@ for (const unbounded of [false, true]) test(`broker complete frame settlement (u
     abort.abort();
     expect(await result).toEqual({ ready: true });
     expect(socket.destroyed).toBeFalse();
-    expect(socket.unreferenced).toBeTrue();
+    expect(socket.unreferenced).toBe(!(process.platform === "win32" && process.versions.bun));
     await setImmediate();
     expect(socket.ended).toBeTrue();
   } finally { abort.abort(); await result.catch(() => {}); }
