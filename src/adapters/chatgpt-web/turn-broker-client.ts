@@ -72,7 +72,9 @@ export async function callTurnBroker<T>(
       // Retire only this completed RPC, never the running turn/native work.
       // Unref now and gracefully half-close outside the native data callback;
       // successful Windows/Bun pipes must not race force-destroy against EOF.
-      socket.unref();
+      // Bun's Windows named-pipe unref races native close callbacks. Graceful
+      // end below owns retirement there; other runtimes can drop the ref now.
+      if (!(process.platform === "win32" && process.versions.bun)) socket.unref();
       setImmediate(() => {
         if (!socket.destroyed && !socket.writableEnded && !socket.readableEnded) socket.end();
       });
