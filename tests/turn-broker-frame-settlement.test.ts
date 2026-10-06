@@ -45,8 +45,9 @@ const createCall = new Function("createConnection", "opaqueId", "MAX_BROKER_LINE
   new Bun.Transpiler({ loader: "ts" }).transformSync(body) + "\nreturn callTurnBroker;");
 for (const unbounded of [false, true]) test(`broker complete frame settlement (unbounded: ${unbounded})`, async () => {
   const socket = Object.assign(new EventEmitter(), {
-    ended: false, destroyed: false, setEncoding() {}, write() {},
+    ended: false, destroyed: false, unreferenced: false, setEncoding() {}, write() {},
     end() { this.ended = true; }, destroy() { this.destroyed = true; },
+    unref() { this.unreferenced = true; },
   });
   const call = createCall(() => socket, () => "request_test", 1000,
     (value: unknown) => value instanceof Error ? value : new Error(String(value))) as typeof callTurnBroker;
@@ -64,5 +65,8 @@ for (const unbounded of [false, true]) test(`broker complete frame settlement (u
     abort.abort();
     expect(await result).toEqual({ ready: true });
     expect(socket.destroyed).toBeFalse();
+    expect(socket.unreferenced).toBeTrue();
+    await setImmediate();
+    expect(socket.ended).toBeTrue();
   } finally { abort.abort(); await result.catch(() => {}); }
 });
