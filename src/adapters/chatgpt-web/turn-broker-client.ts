@@ -98,7 +98,7 @@ export async function callTurnBroker<T>(
     socket.once("end", () => {
       trace("peer_end");
       if (response) responseAccepted = true;
-      socket.end();
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
       setImmediate(finishResponse);
     });
     socket.once("close", () => {
