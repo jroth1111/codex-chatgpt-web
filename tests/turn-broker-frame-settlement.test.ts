@@ -44,9 +44,10 @@ const body = source.slice(source.indexOf("export class TurnBrokerTimeoutError"))
 const createCall = new Function("createConnection", "opaqueId", "MAX_BROKER_LINE_CHARS", "errorOf",
   new Bun.Transpiler({ loader: "ts" }).transformSync(body) + "\nreturn callTurnBroker;");
 for (const unbounded of [false, true]) test(`broker complete frame settlement (unbounded: ${unbounded})`, async () => {
+  const retired = Promise.withResolvers<void>();
   const socket = Object.assign(new EventEmitter(), {
     ended: false, destroyed: false, unreferenced: false, setEncoding() {}, write() {},
-    end() { this.ended = true; }, destroy() { this.destroyed = true; },
+    end() { this.ended = true; retired.resolve(); }, destroy() { this.destroyed = true; },
     unref() { this.unreferenced = true; },
   });
   const call = createCall(() => socket, () => "request_test", 1000,
@@ -66,7 +67,7 @@ for (const unbounded of [false, true]) test(`broker complete frame settlement (u
     expect(await result).toEqual({ ready: true });
     expect(socket.destroyed).toBeFalse();
     expect(socket.unreferenced).toBe(!(process.platform === "win32" && process.versions.bun));
-    await setImmediate();
+    await retired.promise;
     expect(socket.ended).toBeTrue();
   } finally { abort.abort(); await result.catch(() => {}); }
 });
