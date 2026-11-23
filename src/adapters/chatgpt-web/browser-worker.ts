@@ -760,7 +760,7 @@ export class ChatGptSubmissionRejectionObserver {
 }
 
 type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
-  modelFamily?: "5.6" | "6";
+  modelFamily?: "5.6" | "6" | "6.2";
   selection?: { url: string; label: string };
   usageModel?: ChatGptUsageModel;
 };
@@ -976,7 +976,7 @@ export interface BrowserTurn {
   /** Optional recovery provenance supplied by a caller rebuilding the browser surface. */
   modelReceiptProvenance?: ChatGptModelReceipt["provenance"];
   reasoning?: string;
-  modelFamily?: "5.6" | "6";
+  modelFamily?: "5.6" | "6" | "6.2";
   capabilities: ChatGptWebCapabilities;
   /** Attach the Native2 connector for bridge control without granting outer Codex work capability. */
   nativeConnector?: boolean;
@@ -1831,7 +1831,7 @@ export class ChatGptBrowserWorker {
     capabilities: ChatGptWebCapabilities,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     trackUsage = false,
-    modelFamily?: "5.6" | "6",
+    modelFamily?: "5.6" | "6" | "6.2",
   ): Promise<SelectedChatGptWebModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
     const composer = await this.activeComposer(page);
@@ -6307,10 +6307,10 @@ export class ChatGptBrowserWorker {
           if (turn.tunneledOutput) throw error;
           const retryPrompt = await chatGptBrowserErrorRetryPrompt({
             error: failure,
-            signal: turn.abortSignal,
             attempt: responseAttempt,
             emittedText: answerBuffer.value(),
             compaction: turn.compaction === true,
+            signal: turn.abortSignal,
             ...(turn.retryPromptForError ? { sessionRetry: turn.retryPromptForError } : {}),
           });
           if (!retryPrompt) throw error;

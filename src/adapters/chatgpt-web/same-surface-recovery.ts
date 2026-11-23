@@ -64,7 +64,10 @@ export async function chatGptBrowserErrorRetryPrompt(options: {
     );
   }
   if (options.sessionRetry) {
-    return withAbort(Promise.resolve().then(() => options.sessionRetry!(options.error, options.attempt)), options.signal);
+    return withAbort(Promise.resolve().then(() => {
+      if (options.signal?.aborted) return undefined;
+      return options.sessionRetry!(options.error, options.attempt);
+    }), options.signal);
   }
   return chatGptTerminalErrorRetryPrompt(
     options.error,

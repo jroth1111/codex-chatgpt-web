@@ -4,6 +4,8 @@ import {
   CHATGPT_EFFORT_MENU_SELECTOR,
   chatGptEffortSlider,
   readChatGptEffortSnapshot,
+  readChatGptModelAnnouncements,
+  parseChatGptModelAnnouncement,
   openChatGptModelRows,
   type ChatGptEffortActivation,
 } from "./chatgpt-ui/model-picker";
@@ -279,7 +281,7 @@ export async function detectChatGptAccountCapabilities(
     }
     const initial = await readChatGptEffortSnapshot(sliderContainer);
     let current: ChatGptEffortActivation = { method: "already-open", menu, sliderContainer, slider };
-    const families = ["5.6", "6"] as const;
+    const families = ["5.6", "6", "6.2"] as const;
     const present: (typeof families[number])[] = [];
     let original: typeof families[number] | undefined;
     for (const family of families) {
@@ -288,7 +290,7 @@ export async function detectChatGptAccountCapabilities(
       if (count > 1) throw new Error("ChatGPT model capability probe found ambiguous family radios");
       if (count === 1) {
         present.push(family);
-        if (await option.getAttribute("aria-checked") === "true") original = family;
+        if (await option.getAttribute("aria-checked") === "true") original ??= family;
       }
     }
     // Older selector variants have no family radios. Keep their existing account-only contract.
@@ -313,6 +315,13 @@ export async function detectChatGptAccountCapabilities(
         current = await reopen();
         current = await selectChatGptModelFamily(current, family, reopen);
         const snapshot = await readChatGptEffortSnapshot(current.sliderContainer);
+        if (family === "6.2") {
+          const evidence = (await readChatGptModelAnnouncements(current.slider))
+            .flatMap(label => parseChatGptModelAnnouncement(label) ?? []);
+          if (!evidence.length || evidence.some(state => state.version !== "6.2" || (state.name && state.name !== "sol"))) continue;
+          modelCapabilities.families[family] = effortOrder.filter((effort, index) => effort !== "max" && snapshot.available[index] === true);
+          continue;
+        }
         modelCapabilities.families[family] = effortOrder.filter((_, index) => snapshot.available[index] === true);
         if (family === "6" && hasAstra) {
           current = await selectChatGptModelFamily(current, family, reopen, "max");

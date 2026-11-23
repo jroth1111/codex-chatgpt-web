@@ -26,7 +26,7 @@ export interface BrowserHelperRunMessage {
     backendContextModel?: string;
     modelReceiptProvenance?: ChatGptModelReceipt["provenance"];
     reasoning?: string;
-    modelFamily?: "5.6" | "6";
+    modelFamily?: "5.6" | "6" | "6.2";
     capabilities: ChatGptWebCapabilities;
     nativeConnector?: boolean;
     allowStartupPreparation?: boolean;

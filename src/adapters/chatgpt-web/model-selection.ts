@@ -136,7 +136,7 @@ export async function assertChatGptModelFamily(
     const expectedFamily = legacyLatest && effort !== "max" ? "5.6" : family;
     if (checked && state && state.value === state.min + effortIndex && modelVersionEvidenceMatches(descriptions, expectedFamily)
       && (chatGptModelFamilyMatches(descriptions, expectedFamily, effort)
-      || (!legacyLatest && chatGptUnversionedEffortMatches(descriptions, effort)))) return;
+      || (family !== "6.2" && !legacyLatest && chatGptUnversionedEffortMatches(descriptions, effort)))) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);

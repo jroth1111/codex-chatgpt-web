@@ -70,10 +70,11 @@ describe("native /models augmentation", () => {
     expect(legacy.map(model => [model.context_window, model.auto_compact_token_limit])).toEqual([
       [137_000, 123_300], [256_000, 230_400], [256_000, 230_400], [256_000, 230_400], [272_000, 244_800],
     ]);
-    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
-    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
+    const observedRoutes = CHATGPT_WEB_MODEL_ROUTES.filter(route => route.modelFamily !== "6.2");
+    expect(web.map(model => model.slug)).toEqual(observedRoutes.map(route => route.slug));
+    expect(web.map(model => model.display_name)).toEqual(observedRoutes.map(route => route.displayName));
     for (const [index, model] of web.entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+      const route = observedRoutes[index]!;
       const limits = resolveChatGptWebContextLimits(
         route.backendModel,
         route.adapterEffort,

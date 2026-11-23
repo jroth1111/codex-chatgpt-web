@@ -104,6 +104,22 @@ test("an Enhanced session retry decision is authoritative over the generic upstr
   })).toContain("Do not repeat completed tool calls");
 });
 
+test("cancellation skips or interrupts a pending session retry decision", async () => {
+  const controller = new AbortController();
+  let checks = 0;
+  const options = {
+    error: new Error("browser failure"), attempt: 1, emittedText: "", compaction: false,
+    signal: controller.signal,
+    sessionRetry: () => { checks++; return new Promise<undefined>(() => {}); },
+  };
+  const decision = chatGptBrowserErrorRetryPrompt(options);
+  await Promise.resolve();
+  controller.abort();
+  await expect(decision).rejects.toMatchObject({ name: "AbortError" });
+  expect(await chatGptBrowserErrorRetryPrompt(options)).toBeUndefined();
+  expect(checks).toBe(1);
+});
+
 test("compaction terminal recovery never falls through to a task-session retry", async () => {
   const failure = new ChatGptWebAdapterError(
     "upstream failed",
