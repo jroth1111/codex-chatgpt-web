@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -72,8 +72,14 @@ export async function startChatGptMcpHttpServer(options: {
   const portOption = options.port ?? 17842;
   if (!Number.isInteger(portOption) || portOption < 0 || portOption > 65535) throw new Error("Invalid MCP HTTP port");
   let active = 0, closing = false;
+  const responses = new Set<ServerResponse>();
   let closePromise: Promise<void> | undefined;
   const server = createServer(async (request, response) => {
+    responses.add(response);
+    const forgetResponse = () => { responses.delete(response); };
+    response.once("finish", forgetResponse);
+    response.once("close", forgetResponse);
+    if (closing) response.setHeader("connection", "close");
     const reject = (status: number, code: string) => {
       request.resume();
       response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ error: code }));
@@ -124,6 +130,11 @@ export async function startChatGptMcpHttpServer(options: {
     close: () => {
       if (closePromise) return closePromise;
       closing = true;
+      // Active replies must become nonpersistent after they finish; the idle
+      // sweep below cannot see sockets that are still writing these replies.
+      for (const response of responses) {
+        if (!response.headersSent) response.setHeader("connection", "close");
+      }
       // Graceful shutdown waits for real requests; no slow-work lifetime timer.
       closePromise = new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
