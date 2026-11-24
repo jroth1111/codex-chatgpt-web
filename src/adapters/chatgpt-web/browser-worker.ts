@@ -610,6 +610,16 @@ export class ChatGptSubmissionRejectionObserver {
       this.streams.set(response.request(), response);
       return;
     }
+    const status = response.status();
+    if (status === 401 || status === 403 || status === 429) {
+      const code = status === 401 ? "chatgpt_authentication_required"
+        : status === 403 ? "chatgpt_request_forbidden" : "chatgpt_rate_limited";
+      const error = new ChatGptWebAdapterError(`Owned ChatGPT request returned HTTP ${status}; no automatic resubmission.`,
+        { status, errorType: "server_error", code, retryable: false });
+      this.checks.push(Promise.resolve(error));
+      this.onRejected?.(error);
+      return;
+    }
     if (response.status() === 404 && contentType?.includes("application/json")) {
       this.observeRejection(response.json().then(body => body?.detail === "Model not found"
         || body?.detail?.code === "model_not_found" || body?.error?.code === "model_not_found"),

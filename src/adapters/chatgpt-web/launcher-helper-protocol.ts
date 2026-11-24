@@ -70,6 +70,7 @@ const EVENT_FIELDS: Record<string, readonly string[]> = {
   prepared_selected: ["reused"],
   compaction_boundary_retention_armed: ["armed"],
   heartbeat: ["text", "continuation"],
+  generation_progress: ["text", "continuation"],
   send_activated: ["text", "continuation"],
   submitted: ["text", "continuation"],
   retry_submitted: ["text", "continuation"],

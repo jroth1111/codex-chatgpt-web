@@ -162,7 +162,7 @@ test("large advertised tool inventories remain complete through the context arch
 }, 30_000);
 
 test("tool-capable prompts above the stable 94208 character boundary use the archive", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-context-stable-limit-"));
+  const root = mkdtempSync(join(tmpdir(), "cgw-limit-"));
   const broker = TurnBroker.forSocket(defaultBrokerEndpoint(root));
   const turnToken = await broker.register({
     cwd: process.cwd(), roots: [process.cwd()], writableRoots: [], sandboxPolicy: { type: "readOnly", networkAccess: false }, tools: [],
@@ -195,7 +195,7 @@ test("tool-capable prompts above the stable 94208 character boundary use the arc
     await broker.close();
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test("archive bootstrap preserves the lazy stateful tool contract", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-context-tool-contract-"));

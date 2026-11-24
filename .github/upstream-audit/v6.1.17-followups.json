@@ -10,5 +10,161 @@
     "baselineSha256": "2ab3011a8e7e7b541552f168e6c7cbab0c46de68a0433381858f1a581f462188",
     "currentSha256": "979fd49a770384f87083464c08af0f63d02dd96a65a070a8ef9b498399581f9e",
     "reason": "Document the verified native fork Actions opt-in after enabled API settings still rejected CI. Re-enabling cleared the disabled-workflows error with the US$0 budget unchanged. Distinguish rounded storage warnings from an established disable cause and require exact-commit CI evidence. No runtime, workflow or billing change."
+  },
+  {
+    "path": "tests/browser-worker-contract.test.ts",
+    "baselineSha256": "bff54313287ce94dec5b122c81dc69beecd3f742bd435d5af76857a89d02d528",
+    "currentSha256": "7be652cc440e8ff4b1e396a708baf5350c8772ab14885959fd1cb2856c1d74b7",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "tests/chatgpt-effort-browser.test.ts",
+    "baselineSha256": "057c637b6229736c60ced9a2a18463d6b91efbaf967e99a46abe3798c38acb26",
+    "currentSha256": "626fbb79885e59da09c3d050ef4d4bcee3cb178c14639e40bbc4c63d95a48bab",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "tests/chatgpt-model-family-browser.test.ts",
+    "baselineSha256": "5e48b1d8d9592d9a4cec09a526147a1670575427078108342642dcf60490def4",
+    "currentSha256": "1c2209da8377171a312161c6fa6ec1591817208709f87cd744af551180f350d5",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "tests/chatgpt-model-selection.test.ts",
+    "baselineSha256": "e6ae5bcd978526e514ab888a96e69a248919a34373c87680d8eea36730261fdf",
+    "currentSha256": "e326b0cea7b5f24d1c5d908e54a3d4d4d6e2532374c6b6c97f39435bdb0b4bd2",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/mcp-tool-inventory.ts",
+    "baselineSha256": "694e91c312104025b14ffc88be601d95d004e7206c292381db50502c53e82019",
+    "currentSha256": "14fd106b5d86535e5a45ad0285c6c7193b067bc23f46ab6b8c9b1f22676ad439",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/adapter-runtime-factory.ts",
+    "baselineSha256": "15d48cf039236656c00671dfd5de42522bc0f55eded83de0e78cc03330a2ff65",
+    "currentSha256": "0947b2b92d96e275ce760b44cfdf4303d0e57243d20e75184323d77529c4e3e4",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/multipart-browser-transport.ts",
+    "baselineSha256": "7b11646083e168e23952d6622a20375f9ede0d97628cc869274f7441f6738fa9",
+    "currentSha256": "96c3301d3fdcf8c45dc333adf05089272c6980d8a7c29e86f831c958935414a9",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/turn-execution.ts",
+    "baselineSha256": "e08a4dd1dc860a3e0653c451d14d805d53b1d9d13aafb845d5786aeac4b89fdf",
+    "currentSha256": "e42c98af6a5bfaa52685b49d48d0430af5b9c80d0f4dc3df4c082d8d5e9aa0d4",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "launcher/electron/browser-host.cjs",
+    "baselineSha256": "b6c7f0f4834c168e15cfb3a253f98be2b52426bef7e708959818bb39c59366fe",
+    "currentSha256": "c4a3f1e4706c9447a4c33d684aabbe1151fc99838221147fa37f67a1eb9fbbcc",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/cli.ts",
+    "baselineSha256": "4d6c99bc7d2b854eda7ce9a6417ac63a0db26e5aaba4c919711a7c9994e03aef",
+    "currentSha256": "6ebc589f049faea87289b00e991b77e1063927a93e486cf2f88890fd19ef8b8c",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/config.ts",
+    "baselineSha256": "00b6a5b445574229cb36b251d65e8d32ce301d9781bfcd9bee535857f5153df4",
+    "currentSha256": "637f19b8b5aaaf4ac754411a98502bdd49b60052fad638ab1e577959e9c55e51",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/dev-chat/cli.ts",
+    "baselineSha256": "0f633e858a814b7ac6af733050d3ee5d888e24a4e0dcfd684cf48701cc2aa3ef",
+    "currentSha256": "ec0187d1f4f8dae81247519cd8229552d64b8f8fa447643ecdc20dc756a12574",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/types.ts",
+    "baselineSha256": "fca3305fea5af619051288b58a7871a2f71a0ccaecb28ad98a50cd6722c1b575",
+    "currentSha256": "7935de694a6c7fe5775c94f5005999ba574c8dbf1df49bee57d938cda2e3f614",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/model-selection.ts",
+    "baselineSha256": "3c92fc02111557cc7c29a2c636fa5277724dd7464c70470653dc1e7b6a776837",
+    "currentSha256": "3492834ab61dbbaf9c23296bcc80dad511bac53998da67a679337fba82e81c77",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/chatgpt-session.ts",
+    "baselineSha256": "c25fa8172569ee157d7684ed4e82bbaf853f5d8b439a9684566d7f6977fc467f",
+    "currentSha256": "b0d07bae55e6470b3879ece4430b9d9935bc061af442f41ee8ce709a4bff25ff",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/chatgpt-ui/model-picker.ts",
+    "baselineSha256": "642c97e889c447b1593d118df33dc0140a304558b1504ce65a97a625b88e59df",
+    "currentSha256": "7dea909e40e3fb4e171e42c2ec5409a2afbda26fcccc26ce1f8720cd896af7b1",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/chatgpt-web-models.ts",
+    "baselineSha256": "ce95133a06d96f6c9efa2c41e51a1f483a2bdc38e6506031d218ff94e492ca3a",
+    "currentSha256": "d2df8dc8f072093b4c9e3e63a5b375bbf90379caff8241dab24adcd19963a206",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "launcher/electron/browser-helper-verifier.cjs",
+    "baselineSha256": "8f0e73d3eabc4b41a5106918d9e9ad8f590511193991111706f5e8a518245e7e",
+    "currentSha256": "6e5be0a21b863d1db5a9ed7728cdba24a1a82faf34377e59073b0a1a26c0b532",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/browser-helper-main.ts",
+    "baselineSha256": "4440aebac9bbdcec24884459f940cd49d9c27cb52fce26e2ba9f3b54a886ec4d",
+    "currentSha256": "a60829a66d29ddea984c1766ef4aecb874882e272bc03a0d59e770bb5439eb6e",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/browser-worker.ts",
+    "baselineSha256": "e86978053995e7f982b6d36bbef153bd01c32073d18f63fb94ba458643457bbb",
+    "currentSha256": "71c45c34ab04291b0954d3c271083bc2ed8d7f7c2a2a20897116a7ef5062cd89",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/launcher-helper-client.ts",
+    "baselineSha256": "c787d9d779daf64bd17052b2809f572db62ab8c1f3c3c9c62bc07d429c862882",
+    "currentSha256": "4e0bdeae8ea2f11aa04834bc1b83628dfeb05f98c8f3cb57b5254bd28646ae61",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/server.ts",
+    "baselineSha256": "9f69260d2f706a40c3962d152d44d9c08ab42d8961089f3dc29ea84088547fb4",
+    "currentSha256": "379bd49cb1ac38bf58f37eb0bfde70f8510258ef3f7b8b2cabd899595312c554",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/prompt.ts",
+    "baselineSha256": "1cef2e4dc3a08b45f9bb5e8b5a659ae1889194eed6201669a342a52752720f28",
+    "currentSha256": "3fcc888e6b0c8c6f3ac2f1026d32eaf0ecf2a53d3523bf4784df530c59f174df",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/turn-broker.ts",
+    "baselineSha256": "43539631c14228a6657a58d88c488d24bddd699d205a07f99a41507433ff3d9c",
+    "currentSha256": "20e106db3463818085515f9f2eb6161fd25388e4bf715421abf31ed1373cb7b4",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/adapters/chatgpt-web/mcp-server.ts",
+    "baselineSha256": "70ec47b689824727f51eaa273174340ad4d4aaab4dd0cfaa8d7f51412c7ab00d",
+    "currentSha256": "d92e0c06fa2c6c05cd083d283fd10438ced2393858e8f4547b444664922ce148",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
+  },
+  {
+    "path": "src/doctor.ts",
+    "baselineSha256": "9a87e7c5dbe7789a84a2aecae2ede2fb1f68e7ad241c46fdb33e723cc371acdf",
+    "currentSha256": "a9c3040d03616224790060d57a69a738d45033ab5b382709356d61f7129c75b5",
+    "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
   }
 ]
