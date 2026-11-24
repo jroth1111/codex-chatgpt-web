@@ -31,6 +31,8 @@ export const CHATGPT_TEMPORARY_CHAT_MODE_BUTTON_SELECTOR = [
 ].join(", ");
 export const CHATGPT_TEMPORARY_CHAT_ACTIVE_SELECTOR = [
   '[data-testid="temporary-chat-label"]',
+  'button:is([aria-label="Turn off temporary chat"], [title="Turn off temporary chat"])',
+  'h1:text-is("Temporary chat")',
   ...["header", "#conversation-header-actions", "[data-app-shell-header-obstacle]"].flatMap(scope =>
     ["codex-icon-chat-bubble-checkmark-dashed-light-20", "chat-bubble-checkmark-dashed-light-20", "chat-temp-checked"]
       .map(icon => `${scope} button:has(use[href$="#${icon}"])`)),

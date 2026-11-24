@@ -98,7 +98,7 @@
   {
     "path": "src/chatgpt-session.ts",
     "baselineSha256": "c25fa8172569ee157d7684ed4e82bbaf853f5d8b439a9684566d7f6977fc467f",
-    "currentSha256": "b0d07bae55e6470b3879ece4430b9d9935bc061af442f41ee8ce709a4bff25ff",
+    "currentSha256": "1d67fe4d5b1360b3f560e31a9606f1afd1d3f56ebff4058fcc8893b4d7528835",
     "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
   },
   {

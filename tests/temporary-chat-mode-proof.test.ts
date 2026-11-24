@@ -23,5 +23,11 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("Temporary Chat proof recogni
       expect(await page.locator(CHATGPT_TEMPORARY_CHAT_ACTIVE_SELECTOR).filter({ visible: true }).evaluateAll(nodes => nodes.map(node => node.id)))
         .toEqual(["active"]);
     }
+    await page.setContent(`<h1 id="heading">Temporary chat</h1>
+      <button id="off" aria-label="Turn off temporary chat"></button>
+      <button id="on" aria-label="Turn on temporary chat"></button>
+      <p id="copy">Temporary chat</p>`);
+    expect(await page.locator(CHATGPT_TEMPORARY_CHAT_ACTIVE_SELECTOR).filter({ visible: true }).evaluateAll(nodes => nodes.map(node => node.id)))
+      .toEqual(["heading", "off"]);
   } finally { await browser.close(); }
-});
+}, 30_000);
