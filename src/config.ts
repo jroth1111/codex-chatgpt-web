@@ -406,12 +406,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid extraHighAvailable in ${path}`);
   }
   validateExperimentalFeatures(parsed, path);
-  for (const feature of ["experimentalBiggerContext", "experimentalPlusNativeContext", "experimentalSkillAttachments",
-    "experimentalComposerPlainText", "experimentalNoAutoCompact", "composerPredictionsEnabled", "zeroRiskProEnabled"] as const) {
-    if (parsed[feature] !== undefined && typeof parsed[feature] !== "boolean") {
-      throw new Error(`Invalid ${feature} in ${path}`);
-    }
-  }
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);

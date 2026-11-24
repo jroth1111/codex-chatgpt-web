@@ -74,7 +74,7 @@
   {
     "path": "src/config.ts",
     "baselineSha256": "00b6a5b445574229cb36b251d65e8d32ce301d9781bfcd9bee535857f5153df4",
-    "currentSha256": "637f19b8b5aaaf4ac754411a98502bdd49b60052fad638ab1e577959e9c55e51",
+    "currentSha256": "ea679d073de5744f37ade0efbfcde8d77bad6d881438e8a84e7408bde1145abf",
     "reason": "Reconcile the current Enhanced baseline with fork workflow and explicit GPT-6.2 support; original source anchor remains unchanged."
   },
   {

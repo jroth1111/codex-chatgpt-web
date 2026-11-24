@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { _electron as electron } from "playwright-core";
 import { ChatGptModelReceiptObserver } from "../src/adapters/chatgpt-web/model-receipt";
 
 const ELECTRON_PATH = join(import.meta.dir, "..", "launcher/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
+const expectedElectron = JSON.parse(readFileSync(new URL("../launcher/package.json", import.meta.url), "utf8")).devDependencies.electron;
 
 test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer captures a loopback SSE without user state", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-model-receipt-electron-"));
@@ -146,7 +147,7 @@ test.skipIf(!existsSync(ELECTRON_PATH))("installed Electron CDP observer capture
     }, `${origin}/backend-api/f/conversation`);
     await observer.flushCurrent();
     await observer.dispose();
-    expect(runtime.electron).toBe("41.10.7");
+    expect(runtime.electron).toBe(expectedElectron);
     expect(typeof runtime.chromium).toBe("string");
     expect(result.status).toBe(200);
     expect(result.body).toContain("resolved_model_slug");

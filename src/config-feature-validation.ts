@@ -2,7 +2,8 @@ import type { AppConfig } from "./config-interaction";
 
 export function validateExperimentalFeatures(parsed: Partial<AppConfig>, path: string): void {
   for (const feature of ["experimentalBiggerContext", "experimentalSkillAttachments",
-    "experimentalComposerPlainText", "experimentalNoAutoCompact", "experimentalParallelSubagents"] as const) {
+    "experimentalComposerPlainText", "experimentalNoAutoCompact", "experimentalParallelSubagents",
+    "experimentalPlusNativeContext", "composerPredictionsEnabled", "zeroRiskProEnabled"] as const) {
     if (parsed[feature] !== undefined && typeof parsed[feature] !== "boolean") {
       throw new Error(`Invalid ${feature} in ${path}`);
     }
