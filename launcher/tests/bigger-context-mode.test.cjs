@@ -4,6 +4,15 @@ const os = require("node:os");
 const path = require("node:path");
 const { RuntimeHost } = require("../electron/runtime.cjs");
 
+test("Original Luna supports experimental Bigger Context while unknown capabilities stay unavailable in settings", () => {
+  const { assertBiggerContextChangeAllowed } = require("../electron/context-mode.cjs");
+  for (const config of [{}, { solAvailable: false }]) {
+    assert.doesNotThrow(() => assertBiggerContextChangeAllowed(config, true));
+    assert.doesNotThrow(() => assertBiggerContextChangeAllowed(config, false));
+  }
+  assert.doesNotThrow(() => assertBiggerContextChangeAllowed({ solAvailable: true }, true));
+});
+
 test("Bigger Context cannot be enabled while Enhanced Web session mode is active", async () => {
   const config = {
     mode: "browser-only",
@@ -42,6 +51,6 @@ test("manual Bigger Context is rejected before setup can stop the runtime", asyn
 test("manual settings wire the interaction boundary and explain standard context", () => {
   const source = require("node:fs").readFileSync(path.join(__dirname, "../src/settings-surface.tsx"), "utf8");
   assert.match(source, /biggerContextSwitchState\(\{\s*browserInteractionMode: snapshot\.state\.browserInteractionMode,/);
-  assert.match(source, /browserInteractionMode === "manual" \? copy\.manualBiggerContextBody : copy\.biggerContextBody/);
+  assert.match(source, /browserInteractionMode === "manual" \? copy\.manualBiggerContextBody\s*: copy\.biggerContextBody/);
   assert.match(source, /checked=\{snapshot\.state\.showBrowserDuringTurns\}\s*disabled=\{snapshot\.state\.browserInteractionMode === "manual"\}/);
 });

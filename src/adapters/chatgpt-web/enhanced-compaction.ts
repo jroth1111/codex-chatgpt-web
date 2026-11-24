@@ -1,11 +1,12 @@
+import { chatGptSuspensionClock, remainingStageBudgetMs } from "./browser-stage-lifecycle";
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptBrowserWorker } from "./browser-worker";
 import {
   canonicalizeCompactionHandoff,
-  chatGptCompactionDeadlineMs,
   existingStructuredCompactionRun,
+  MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   runStructuredCompactionOnce,
   settleActiveCompactionSource,
   withCompactionAbort,
@@ -23,6 +24,7 @@ import { estimateChatGptWebUsage } from "./usage";
 import { extractChatGptTurnIdentity } from "./environment";
 
 interface EnhancedCompactionOptions {
+  appName?: string;
   worker: Pick<ChatGptBrowserWorker, "run">
     & Partial<Pick<ChatGptBrowserWorker, "requestPreemptiveRetry" | "armCompactionBoundaryRetention">>;
   parsed: CodexParsedRequest;
@@ -34,7 +36,7 @@ interface EnhancedCompactionOptions {
   abortSignal?: AbortSignal;
   timeoutMs?: number;
   requireAutomaticAdmission?: (traceId: string) => void;
-  startFallback: (traceId: string, signal: AbortSignal, onProgress: () => void,
+  startFallback: (traceId: string, signal: AbortSignal, onProgress: (kind?: "generation" | "submitted" | "multipart_acknowledged", part?: number) => void,
     retainOwnershipUntil: (settlement: Promise<void>) => void, controlInstruction: string) => Promise<string>;
   emit: (event: AdapterEvent) => void;
 }
@@ -69,29 +71,49 @@ export async function runEnhancedCompaction(
     traceIds: [traceId, `${traceId}_fallback`],
     nativeThreadId: identity.threadId, nativeTurnId: identity.turnId,
   }, async (operatorSignal, retainOwnershipUntil) => {
-    // No implicit inference deadline. The operator/owner controls cancellation;
-    // an explicitly configured timeout remains authoritative.
-    const handoffTimeoutMs = chatGptCompactionDeadlineMs(timeoutMs);
+    const handoffTimeoutMs = Math.min(
+      timeoutMs ?? MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+      MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+    );
     const deadline = new AbortController();
     let phase = "source_settlement";
     let timer: ReturnType<typeof setTimeout> | undefined;
     let fallbackTransaction: Awaited<ReturnType<TurnBroker["beginCompactionTransaction"]>> | undefined;
-    const armDeadline = (): void => {
-      if (deadline.signal.aborted || handoffTimeoutMs === null) return;
+    const handoffStartedAt = performance.now();
+    let lastActivity = "started";
+    let acknowledgedParts = 0;
+    const armDeadline = (kind?: "generation" | "submitted" | "multipart_acknowledged", part?: number): void => {
+      if (kind === "generation") return; // Generation state is liveness, not observed content progress.
+      lastActivity = kind ?? "source_activity";
+      if (part !== undefined) acknowledgedParts = part;
+      if (deadline.signal.aborted) return;
       if (timer) clearTimeout(timer);
-      timer = setTimeout(
-        () => deadline.abort(new ChatGptWebAdapterError(`ChatGPT compaction did not fully settle within ${handoffTimeoutMs}ms (phase=${phase})`, { status: 409, errorType: "invalid_request_error", code: "compaction_handoff_timeout", retryable: false })),
-        handoffTimeoutMs,
-      );
+      const activityAt = performance.now();
+      const suspendedAtActivity = chatGptSuspensionClock.suspendedMs();
+      const fireOrRearm = () => {
+        const suspendedMs = chatGptSuspensionClock.suspendedMs() - suspendedAtActivity;
+        const idleMs = performance.now() - activityAt;
+        const remaining = remainingStageBudgetMs(handoffTimeoutMs, idleMs, suspendedMs);
+        if (remaining > 0) { timer = setTimeout(fireOrRearm, remaining); timer.unref?.(); return; }
+        console.warn('[chatgpt-web] compaction_timeout ' + JSON.stringify({
+          traceId, phase, timeoutMs: handoffTimeoutMs, lastActivity, acknowledgedParts,
+          elapsedMs: Math.round(performance.now() - handoffStartedAt), idleMs: Math.round(idleMs),
+          suspendedMs: Math.round(suspendedMs), awakeIdleMs: Math.round(idleMs - suspendedMs),
+        }));
+        deadline.abort(new ChatGptWebAdapterError(          `ChatGPT compaction did not fully settle within ${handoffTimeoutMs}ms (phase=${phase})`,
+          { status: 409, errorType: 'invalid_request_error', code: 'compaction_handoff_timeout', retryable: false }));
+      };
+      timer = setTimeout(fireOrRearm, handoffTimeoutMs);
       timer.unref?.();
       if (fallbackTransaction) {
-        broker.refreshCompactionTransaction(fallbackTransaction.token, handoffTimeoutMs);
+        broker.refreshCompactionTransaction(fallbackTransaction.token, MAX_COMPACTION_HANDOFF_TIMEOUT_MS);
       }
     };
     armDeadline();
     const operationSignal = AbortSignal.any([deadline.signal, operatorSignal]);
     let source: ChatGptTurnSession | undefined;
     let preserveFinal = false;
+    let stopSourceProgress: (() => void) | undefined;
     const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
     const fallback = async (reason: string): Promise<string> => {
       operationSignal.throwIfAborted();
@@ -105,7 +127,7 @@ export async function runEnhancedCompaction(
       try {
         // Multipart prompt stages refresh the operation deadline, while the one-shot control token
         // cannot be reissued after it has been embedded in the final browser message.
-        const pending = broker.beginCompactionTransaction(`${traceId}_fallback`, handoffTimeoutMs);
+        const pending = broker.beginCompactionTransaction(`${traceId}_fallback`, MAX_COMPACTION_HANDOFF_TIMEOUT_MS);
         void pending.then(late => {
           if (operationSignal.aborted && fallbackTransaction !== late) broker.abortCompactionTransaction(late.token);
         }, () => {});
@@ -115,7 +137,7 @@ export async function runEnhancedCompaction(
           AbortSignal.any([operationSignal, browserAbort.signal]),
           armDeadline,
           retainOwnershipUntil,
-          structuredCompactionHandoffInstruction(fallbackTransaction),
+          structuredCompactionHandoffInstruction(fallbackTransaction, options.appName),
         );
         const accepted = broker.waitForCompactionHandoff(fallbackTransaction.token, operationSignal);
         const browserWithoutHandoff = browser.then<never>(() => {
@@ -139,6 +161,7 @@ export async function runEnhancedCompaction(
       await chatGptTurnSessions.waitForRetirement(responseExecutionKey, operationSignal);
       if (sourceConversationKey) await chatGptTurnSessions.waitForConversationRetirement(sourceConversationKey, operationSignal);
       source = chatGptTurnSessions.find(responseExecutionKey);
+      stopSourceProgress = source?.runtime.trace.observeProgress(armDeadline);
       preserveFinal = !source?.isActive() && source?.settledOutcome()?.type === "final";
       const conversationKey = source?.conversationKey();
       if (!source || !conversationKey) {
@@ -159,6 +182,7 @@ export async function runEnhancedCompaction(
           sourceTraceId && worker.armCompactionBoundaryRetention
             ? () => worker.armCompactionBoundaryRetention!(sourceTraceId)
             : undefined,
+          options.appName,
         );
         preserveFinal = !settled.compactionInstructionDelivered;
         raw = settled.handoff;
@@ -170,11 +194,13 @@ export async function runEnhancedCompaction(
         preserveFinal = true;
       }
       if (raw === undefined) {
+        stopSourceProgress?.();
+        stopSourceProgress = undefined;
         phase = "retained_checkpoint";
         armDeadline();
         raw = await requestRetainedCompactionHandoff(
           worker, parsed, source, broker, capabilities, traceId, operationSignal, handoffTimeoutMs,
-          requireAutomaticAdmission, retainOwnershipUntil,
+          requireAutomaticAdmission, retainOwnershipUntil, armDeadline,
         );
       }
       const canonical = canonicalizeCompactionHandoff(parsed, raw);
@@ -210,6 +236,7 @@ export async function runEnhancedCompaction(
       }
       throw error;
     } finally {
+      stopSourceProgress?.();
       clearTimeout(timer);
     }
   });

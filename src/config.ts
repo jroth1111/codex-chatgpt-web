@@ -1,8 +1,8 @@
+import { parseChatGptWebModelCapabilities } from "./chatgpt-web-models";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
-import { tmpdir } from "node:os";
 import { VERSION } from "./version";
 import { validateExperimentalFeatures } from "./config-feature-validation";
 import { effectiveExperimentalBiggerContext } from "./context-mode";
@@ -23,9 +23,7 @@ export function getConfigDir(): string {
   const configured = process.env.CODEX_CHATGPT_WEB_HOME?.trim();
   return resolve(expandUserPath(configured || join(homedir(), ".codex-chatgpt-web")));
 }
-export function getConfigPath(): string {
-  return join(getConfigDir(), "config.json");
-}
+export function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
 export function isWindowsPipeEndpoint(value: string): boolean {
   return /^\\\\\.\\pipe\\[A-Za-z0-9._-]+$/.test(value);
 }
@@ -58,7 +56,7 @@ function renameAtomicFile(source: string, destination: string): void {
 export function atomicWriteFile(
   path: string,
   data: string | Uint8Array,
-  { mode = 0o600, protectDirectory = true }: { mode?: number; protectDirectory?: boolean } = {},
+  { mode = 0o600, protectDirectory = true, durable = false }: { mode?: number; protectDirectory?: boolean; durable?: boolean } = {},
 ): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -69,6 +67,7 @@ export function atomicWriteFile(
   const fd = openSync(temp, "wx", mode);
   try {
     writeFileSync(fd, data);
+    if (durable) fsyncSync(fd);
     closeSync(fd);
     renameAtomicFile(temp, path);
   } catch (error) {
@@ -84,7 +83,6 @@ export function stripUtf8Bom(text: string): string {
 export function preserveUtf8Bom(text: string, original: string): string {
   return original.startsWith("\uFEFF") ? `\uFEFF${stripUtf8Bom(text)}` : stripUtf8Bom(text);
 }
-
 export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
   const home = getConfigDir();
   return {
@@ -110,6 +108,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     extraHighAvailable: false,
     proAvailable: false,
     experimentalBiggerContext: false,
+    experimentalPlusNativeContext: false,
+    composerPredictionsEnabled: false,
     experimentalSkillAttachments: false,
     experimentalParallelSubagents: false,
     experimentalNoAutoCompact: false,
@@ -203,14 +203,12 @@ export function runtimeCommandForProcess({
   assertDurableRuntimeCommand(command);
   return command;
 }
-
 function inside(path: string, root: string): boolean {
   const normalize = (value: string) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
   const normalizedPath = normalize(path);
   const normalizedRoot = normalize(root);
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep}`);
 }
-
 export function assertDurableRuntimeCommand(command: string[]): void {
   if (command.length === 0) throw new Error("Runtime command is empty");
   const executable = command[0]!;
@@ -408,8 +406,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid extraHighAvailable in ${path}`);
   }
   validateExperimentalFeatures(parsed, path);
-  if (parsed.zeroRiskProEnabled !== undefined && typeof parsed.zeroRiskProEnabled !== "boolean") {
-    throw new Error(`Invalid zeroRiskProEnabled in ${path}`);
+  for (const feature of ["experimentalBiggerContext", "experimentalPlusNativeContext", "experimentalSkillAttachments",
+    "experimentalComposerPlainText", "experimentalNoAutoCompact", "composerPredictionsEnabled", "zeroRiskProEnabled"] as const) {
+    if (parsed[feature] !== undefined && typeof parsed[feature] !== "boolean") {
+      throw new Error(`Invalid ${feature} in ${path}`);
+    }
   }
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
@@ -461,6 +462,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Extra High and Pro require Sol`);
   }
   const { useNewCompactMode, ...canonical } = parsed;
+  delete (canonical as Record<string, unknown>).useTemporaryChats;
   return {
     ...canonical,
     useEnhancedWebSessionMode,
@@ -473,9 +475,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
     solAvailable,
     extraHighAvailable,
     proAvailable,
+    modelCapabilities: parseChatGptWebModelCapabilities(parsed.modelCapabilities),
     experimentalBiggerContext,
+    composerPredictionsEnabled: parsed.composerPredictionsEnabled === true,
     experimentalSkillAttachments,
     experimentalParallelSubagents: parsed.experimentalParallelSubagents === true,
+    experimentalPlusNativeContext: parsed.experimentalPlusNativeContext === true,
     experimentalNoAutoCompact: parsed.experimentalNoAutoCompact === true,
     ...(parsed.experimentalComposerPlainText === true ? { experimentalComposerPlainText: true } : {}),
     experimentalFreshConversationPerTurn,
@@ -493,5 +498,6 @@ export function saveConfig(config: AppConfig): void {
     experimentalFreshConversationPerTurn: !config.useEnhancedWebSessionMode && config.browserInteractionMode !== "manual"
       && config.experimentalFreshConversationPerTurn === true,
   };
+  delete (canonical as Record<string, unknown>).useTemporaryChats;
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(canonical, null, 2)}\n`, original));
 }

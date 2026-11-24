@@ -27,6 +27,8 @@ jobs:
         with:
           node-version: 22.19.0
       - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: launcher
       - run: bun run lifecycle:sim --lane=all
 
   lifecycle-client-probe:
@@ -100,8 +102,12 @@ jobs:
       - name: Prepare owned AppImage toolset
         if: runner.os == 'Linux'
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
-      - run: bun run verify --verbose
-      - run: bun run app:package
+      - run: bun run verify --verbose --package
+        env:
+          # This job has no signing credentials. macOS packaging explicitly uses
+          # identity=- and verifies that ad-hoc signature after extracting the ZIP.
+          # electron-builder otherwise skips even ad-hoc signing for PR builds.
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' && 'true' || 'false' }}
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |

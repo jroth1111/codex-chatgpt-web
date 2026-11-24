@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,7 @@ import {
   installedBunExecutable,
   loadConfig,
   loadConfigForSetup,
+  saveConfig,
   providerConfig,
   resolveBrokerEndpoint,
   runtimeCommandForProcess,
@@ -371,7 +372,7 @@ test("manual provider configuration preserves a distinct backend without guessin
   });
 });
 
-test("conversation preferences survive reload; saved chats also apply to Zero Risk", () => {
+test("retired chat preferences are removed without changing current configuration", () => {
   const root = join(tmpdir(), `codex-web-fresh-config-${process.pid}-${Date.now()}`);
   roots.push(root);
   process.env.CODEX_CHATGPT_WEB_HOME = root;
@@ -385,6 +386,10 @@ test("conversation preferences survive reload; saved chats also apply to Zero Ri
   persist();
   expect(loadConfig()!.experimentalFreshConversationPerTurn).toBe(false);
   expect(loadConfig()!.useSavedChats).toBe(false);
+  config.useSavedChats = false;
+  persist();
+  expect(loadConfigForSetup().useSavedChats).toBe(false);
+  expect(providerConfig(loadConfig()!).chatgptWeb!.useSavedChats).toBe(false);
   config.useSavedChats = true;
   config.experimentalFreshConversationPerTurn = true;
   persist();
@@ -398,10 +403,74 @@ test("conversation preferences survive reload; saved chats also apply to Zero Ri
   config.experimentalFreshConversationPerTurn = "true";
   persist();
   expect(() => loadConfig()).toThrow("experimentalFreshConversationPerTurn");
-  config.experimentalFreshConversationPerTurn = false;
-  config.useSavedChats = "true";
-  persist();
+});
+
+test("Temporary Chat defaults on and preserves the legacy saved-chat preference across config reloads", () => {
+  const root = join(tmpdir(), `codex-temporary-config-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const path = join(root, "config.json");
+  const original: Record<string, unknown> = { ...defaultConfig("browser-only"), useSavedChats: false };
+  expect(original.useSavedChats).toBe(false);
+  delete original.useSavedChats;
+  writeFileSync(path, JSON.stringify(original));
+  expect(loadConfig().useSavedChats).toBe(false);
+  for (const useTemporaryChats of [true, false]) {
+    writeFileSync(path, JSON.stringify({ ...original, useTemporaryChats, unrelatedPreference: "preserve" }));
+    for (const loaded of [loadConfig(), loadConfigForSetup()]) {
+      expect(loaded.useSavedChats).toBe(false);
+      expect(loaded).not.toHaveProperty("useTemporaryChats");
+      saveConfig(loaded);
+      expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ useSavedChats: false, unrelatedPreference: "preserve" });
+      expect(JSON.parse(readFileSync(path, "utf8"))).not.toHaveProperty("useTemporaryChats");
+    }
+  }
+  for (const useSavedChats of [true, false]) for (const useTemporaryChats of [true, false]) {
+    writeFileSync(path, JSON.stringify({ ...original, useSavedChats, useTemporaryChats,
+      unrelatedPreference: "preserve" }));
+    for (const loaded of [loadConfig(), loadConfigForSetup()]) {
+      expect(loaded.useSavedChats).toBe(useSavedChats);
+      expect(loaded).not.toHaveProperty("useTemporaryChats");
+      expect(loaded).toHaveProperty("unrelatedPreference", "preserve");
+      for (const browserInteractionMode of ["automatic", "manual"] as const) {
+        expect(providerConfig({ ...loaded, browserInteractionMode }).chatgptWeb!.useSavedChats).toBe(useSavedChats);
+      }
+      saveConfig(loaded);
+      expect(loadConfig().useSavedChats).toBe(useSavedChats);
+      expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ useSavedChats, unrelatedPreference: "preserve" });
+      expect(JSON.parse(readFileSync(path, "utf8"))).not.toHaveProperty("useTemporaryChats");
+      saveConfig({ ...loaded, useTemporaryChats: !useSavedChats } as typeof loaded);
+      expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ useSavedChats, unrelatedPreference: "preserve" });
+      expect(JSON.parse(readFileSync(path, "utf8"))).not.toHaveProperty("useTemporaryChats");
+    }
+  }
+  writeFileSync(path, JSON.stringify({ ...original, useSavedChats: "true" }));
   expect(() => loadConfig()).toThrow("useSavedChats");
+});
+
+test("composer predictions stay off for old configurations and reject malformed values", () => {
+  const root = join(tmpdir(), `codex-predictions-config-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const config: Record<string, unknown> = { ...defaultConfig("browser-only") };
+  expect(config.composerPredictionsEnabled).toBe(false);
+  delete config.composerPredictionsEnabled;
+  const persist = () => writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  persist();
+  expect(loadConfig().composerPredictionsEnabled).toBe(false);
+  config.composerPredictionsEnabled = true;
+  persist();
+  expect(loadConfig().composerPredictionsEnabled).toBe(true);
+  expect(loadConfigForSetup().composerPredictionsEnabled).toBe(true);
+  config.composerPredictionsEnabled = false;
+  persist();
+  expect(loadConfig().composerPredictionsEnabled).toBe(false);
+  expect(loadConfigForSetup().composerPredictionsEnabled).toBe(false);
+  config.composerPredictionsEnabled = "false";
+  persist();
+  expect(() => loadConfig()).toThrow("composerPredictionsEnabled");
 });
 
 test("skill attachments config defaults off, reaches the adapter, and rejects invalid/manual settings", () => {

@@ -1,3 +1,4 @@
+import { fr } from "./i18n-fr";
 import type { Language } from "./types";
 import { zeroRiskCopy } from "./zero-risk-copy";
 import { ja } from "./i18n-ja";
@@ -25,10 +26,14 @@ const en = {
   devSettingsTitle: "DEV profile settings",
   devKeepRunningBody: "Keep the isolated browser session and DEV MCP tunnel available when this window closes.",
   biggerContext: "Bigger Context (experimental)",
-  biggerContextBody: "Available only when Enhanced Web session mode is off. Small turns use one message; larger turns use two or six messages in total, with only the final message executing the task. Every message is a real ChatGPT request and may consume account allowance. It triples the context and compaction thresholds advertised to Codex; ChatGPT message, model, composer and service limits still apply. This is not unlimited context. Restart Codex after changing it.",
+  biggerContextBody: "Use up to three times more context with GPT-5.6 and GPT-6 Pro by sending large tasks in multiple messages. GPT-6 Sol also supports Bigger Context at Medium, High and available Extra High, including on Plus; the window depends on your plan. GPT-6 Instant uses standard context. Luna/Think support is experimental: Free accounts may lose earlier details in long chats. Extra messages may trigger usage limits sooner. Off by default; restart Codex after changing it.",
+  composerPredictions: "Next-message predictions",
+  composerPredictionsBody: "Off by default. With Enhanced automatic Native output enabled, generate an optional suggestion in the same final answer and reuse its local 5-minute TTL cache. A cache miss returns no suggestion; no extra Web request or page is created.",
   skillAttachments: "Skills as files (experimental)",
   skillAttachmentsBody: "Upload explicitly selected Codex skills as named text files instead of inline instructions. Other skills still load through tools. Off by default; uses the same attachment limit as images.",
   manualSkillAttachmentsUnavailable: "Skill uploads require automatic browser interaction.",
+  plusNativeContext: "Plus native context (experimental)",
+  plusNativeContextBody: "Enhanced Plus reasoning uses a 256K window and compacts at 230.4K. Full long-context recall is unverified. Does not enlarge individual messages or enable Extra High. Off by default; restart Codex after changing it.",
   noAutoCompact: "No Context Window (experimental)",
   preparedWebSession: "Fast startup (experimental)",
   preparedWebSessionBody: "Keep one unsent page with the last verified model and stable harness when capacity permits. Work takes priority. All pages, including retained chats, share Account Safety Maximum concurrency; with session limits off, the ceiling is six. Disabling closes only the standby. Off by default.",
@@ -36,6 +41,7 @@ const en = {
   savedChats: "Save chats in ChatGPT",
   savedChatsBody: "Keep Codex and Claude task conversations in ChatGPT history. ChatGPT memory and custom instructions may apply. API requests always use Temporary Chat. Off by default.",
   freshConversation: "New browser chat for each turn",
+  temporaryChat: "Temporary Chat",
   freshConversationBody: "Rebuild context from the same Codex task in a new browser chat for each turn. This may help when ChatGPT loses access to tools, but can send more context and be slower. Off by default.",
   manualFreshConversationUnavailable: "Available only with Automation and Original session mode. Enhanced and Zero Risk force this setting off.",
   tagline: "ChatGPT Web inside the native Codex harness",
@@ -62,7 +68,7 @@ const en = {
   runtime: "Runtime",
   browser: "Browser",
   openChatgpt: "Open ChatGPT",
-  temporaryChat: "Temporary Chat",
+  newChat: "New chat",
   back: "Back",
   forward: "Forward",
   reload: "Reload",
@@ -89,14 +95,18 @@ const en = {
   stepAccountBody: "Sign in directly in the embedded ChatGPT browser. Login stays in this launcher's private profile.",
   signIn: "Open sign in",
   passkeySignIn: "Use passkey",
-  passkeyContinue: "Continue",
-  passkeyImporting: "Importing…",
-  passkeyContinueBody: "Finish passkey sign-in in the dedicated Chrome window, then return here and choose Continue.",
+  passkeyContinue: "I’m signed in — continue",
+  passkeyImporting: "Finishing sign-in…",
+  passkeyContinueBody: "Sign in to ChatGPT in the separate Chrome window and choose the passkey option there. When ChatGPT opens, return here and click “I’m signed in — continue”.",
+  passkeyOpening: "Opening Chrome…",
+  passkeyOpeningBody: "A separate Chrome window will open for passkey sign-in. Your usual Chrome profile is not used.",
+  passkeyWaitingTitle: "Finish sign-in in Chrome",
+  passkeyImportingBody: "Bringing your ChatGPT session into the launcher and checking that sign-in worked.",
   checkingSignIn: "Checking saved session",
   verifySignIn: "Check sign in",
   signedIn: "Signed in",
   stepSmoke: "Run browser smoke test",
-  stepSmokeBody: "Select High, send a small temporary message, and verify a complete streamed response.",
+  stepSmokeBody: "Select High, send a short test message, and verify a complete streamed response.",
   runSmoke: "Run smoke test",
   smokePassed: "Smoke test passed",
   stepInstall: "Install a coding client",
@@ -128,7 +138,7 @@ const en = {
   mcpStepTwo: "Connect the local harness",
   mcpStepTwoBody: "Paste the Tunnel ID and API key. The tunnel must belong to the same OpenAI account that will use the ChatGPT plugin. The key stays in private local storage and is never written to launcher logs.",
   mcpStepTwoHint: "You can add the MCP connector in ChatGPT only after this step succeeds and the tunnel is running.",
-  mcpCatalogRequired: "Connect harness is unavailable until the Codex models are installed and verified. Return to Setup, click Install models, restart Codex once, and wait for the model catalog check to complete.",
+  mcpSetupRequired: "Install the Codex integration in Setup before connecting the harness. You can connect MCP while Codex refreshes its model list.",
   tunnelId: "Tunnel ID",
   runtimeKey: "API key (not Admin key)",
   connect: "Connect harness",
@@ -155,6 +165,9 @@ const en = {
   doctorMacServiceLoaded: "macOS background service is loaded",
   doctorMacTunnelRunning: "macOS tunnel service is installed, loaded, and running",
   doctorProxyHealthy: "Responses proxy is healthy on {endpoint}",
+  doctorCatalogPending: "This runtime has not observed a completed Codex model-list request yet",
+  doctorCatalogReady: "Codex's latest model-list request succeeded",
+  doctorCatalogFailed: "Codex's latest model-list request failed; the local runtime is reachable",
   doctorTunnelBinaryInstalled: "Pinned openai/tunnel-client binary is installed",
   doctorTunnelKeyStored: "Tunnel runtime key is stored privately",
   doctorTunnelRuntimeOwned: "Launcher owns the tunnel runtime",
@@ -256,7 +269,7 @@ const en = {
   autoApproveToolsBody: "Click Allow once when ChatGPT asks to use the selected Codex plugin. Codex permissions still apply. Off by default.",
   manualAutoApproveUnavailable: "Automatic tool approvals are unavailable in Zero Risk mode.",
   toolApprovalNeeded: "ChatGPT needs your approval",
-  toolApprovalPendingBody: "Open this chat to choose Allow once or Deny. Unanswered requests are denied after one minute.",
+  toolApprovalPendingBody: "Open this chat to choose Allow once or Deny. To allow all tools, open the plugin's settings in ChatGPT → Permissions → Allow all actions. After one minute without a decision, the turn stops without choosing a button.",
   lockBrowserDuringTurns: "Protect browser during turns",
   lockBrowserDuringTurnsBody: "Block direct interaction with ChatGPT while Codex or Claude Code controls the conversation.",
   language: "Language",
@@ -306,10 +319,14 @@ const zh: Record<keyof typeof en, string> = {
   devSettingsTitle: "DEV 配置设置",
   devKeepRunningBody: "窗口关闭后保持隔离的浏览器会话和 DEV MCP Tunnel 可用。",
   biggerContext: "更大上下文（实验性）",
-  biggerContextBody: "仅可在增强型 Web 会话模式关闭时使用。小回合发送一条消息，大回合共发送两条或六条消息，只有最后一条执行任务。每条都是真实的 ChatGPT 请求，可能消耗账户额度。向 Codex 公布的上下文和压缩阈值扩大三倍，但 ChatGPT 的消息、模型、编辑器和服务限制仍有效。这不是无限上下文。更改后请重启 Codex。",
+  biggerContextBody: "将大型任务分成多条消息，让 GPT-5.6 和 GPT-6 Pro 使用多达三倍的上下文。GPT-6 Sol 的 Medium、High 和可用的 Extra High 也支持 Bigger Context，包括 Plus 账户；上下文窗口取决于你的方案。GPT-6 Instant 使用标准上下文。Luna/Think 支持仍处于实验阶段：免费账户可能无法保留长对话中的较早细节。额外消息可能更快触发使用限制。默认关闭；更改后请重启 Codex。",
+  composerPredictions: "下一条消息建议",
+  composerPredictionsBody: "默认关闭。启用 Enhanced 自动模式及 Native 输出后，在同一最终答复中生成可选建议，并复用本地 5 分钟 TTL 缓存。未命中缓存就不提供建议，不创建额外 Web 请求或页面。",
   skillAttachments: "技能作为文件（实验性）",
   skillAttachmentsBody: "将明确选择的 Codex 技能作为命名文本文件上传，而不是内联指令。其他技能仍通过工具读取。默认关闭；与图片共用附件数量限制。",
   manualSkillAttachmentsUnavailable: "上传技能需要自动浏览器交互模式。",
+  plusNativeContext: "Plus 原生上下文（实验性）",
+  plusNativeContextBody: "Enhanced + Plus 推理使用 256K 窗口，230.4K 自动压缩。完整长上下文保留能力尚未验证；不提高单条消息上限或解锁 Extra High。默认关闭；更改后重启 Codex。",
   noAutoCompact: "No Context Window（实验性）",
   preparedWebSession: "快速启动（实验性）",
   preparedWebSessionBody: "有空位时保留一个尚未发送的页面，准备上次验证的模型与固定指令。工作优先；包括保留对话在内的所有页面共用账户安全保护的最大并发数，关闭会话限制时上限为六。关闭仅清理待命页。默认关闭。",
@@ -317,6 +334,7 @@ const zh: Record<keyof typeof en, string> = {
   savedChats: "在 ChatGPT 中保存聊天",
   savedChatsBody: "将 Codex 和 Claude 任务对话保留在 ChatGPT 历史记录中，可能应用 ChatGPT 记忆和自定义指令。API 请求始终使用临时聊天。默认关闭。",
   freshConversation: "每轮使用新的浏览器聊天",
+  temporaryChat: "临时聊天",
   freshConversationBody: "每轮在新的浏览器聊天中重建同一个 Codex 任务的上下文。这可能有助于解决 ChatGPT 丢失工具访问的问题，但可能发送更多上下文，速度也可能更慢。默认关闭。",
   manualFreshConversationUnavailable: "仅支持自动化与 Original 会话模式。Enhanced 和零风险模式会强制关闭此设置。",
   tagline: "在原生 Codex Harness 中运行 ChatGPT Web",
@@ -343,7 +361,7 @@ const zh: Record<keyof typeof en, string> = {
   runtime: "运行时",
   browser: "浏览器",
   openChatgpt: "打开 ChatGPT",
-  temporaryChat: "临时聊天",
+  newChat: "新聊天",
   back: "后退",
   forward: "前进",
   reload: "重新加载",
@@ -370,14 +388,18 @@ const zh: Record<keyof typeof en, string> = {
   stepAccountBody: "直接在内置的 ChatGPT 浏览器中登录。登录会话保留在此启动器的私有配置中。",
   signIn: "打开登录",
   passkeySignIn: "使用通行密钥",
-  passkeyContinue: "继续",
-  passkeyImporting: "正在导入…",
-  passkeyContinueBody: "请在专用 Chrome 窗口中完成通行密钥登录，然后返回此处并选择继续。",
+  passkeyContinue: "我已登录，继续",
+  passkeyImporting: "正在完成登录…",
+  passkeyContinueBody: "请在单独的 Chrome 窗口中登录 ChatGPT，并在其中选择通行密钥。ChatGPT 打开后，返回此处并点击“我已登录，继续”。",
+  passkeyOpening: "正在打开 Chrome…",
+  passkeyOpeningBody: "将打开单独的 Chrome 窗口用于通行密钥登录，不会使用您平时的 Chrome 个人资料。",
+  passkeyWaitingTitle: "在 Chrome 中完成登录",
+  passkeyImportingBody: "正在将 ChatGPT 会话导入启动器并确认登录成功。",
   checkingSignIn: "正在检查已保存的会话",
   verifySignIn: "检查登录",
   signedIn: "已登录",
   stepSmoke: "运行浏览器冒烟测试",
-  stepSmokeBody: "选择 High，发送一条临时消息，并验证完整的流式响应。",
+  stepSmokeBody: "选择 High，发送一条测试消息，并验证完整的流式响应。",
   runSmoke: "运行冒烟测试",
   smokePassed: "冒烟测试通过",
   stepInstall: "安装编程客户端",
@@ -409,7 +431,7 @@ const zh: Record<keyof typeof en, string> = {
   mcpStepTwo: "连接本地 Harness",
   mcpStepTwoBody: "粘贴 Tunnel ID 和 API key。Tunnel 必须属于将使用该 ChatGPT 插件的同一 OpenAI 账户。密钥只保存在本机私有存储中，绝不会写入启动器日志。",
   mcpStepTwoHint: "只有此步骤成功且 Tunnel 正在运行后，才能在 ChatGPT 中添加 MCP 连接器。",
-  mcpCatalogRequired: "在 Codex 模型安装并验证完成前，无法连接 Harness。请返回“设置”，点击“安装模型”，重启一次 Codex，并等待模型列表验证完成。",
+  mcpSetupRequired: "请先在“设置”中安装 Codex 集成，再连接 Harness。Codex 刷新模型列表期间也可以连接 MCP。",
   tunnelId: "Tunnel ID",
   runtimeKey: "API key（不是 Admin key）",
   connect: "连接 Harness",
@@ -436,6 +458,9 @@ const zh: Record<keyof typeof en, string> = {
   doctorMacServiceLoaded: "已加载 macOS 后台服务",
   doctorMacTunnelRunning: "macOS 隧道服务已安装、加载并运行",
   doctorProxyHealthy: "Responses 代理在 {endpoint} 上运行正常",
+  doctorCatalogPending: "当前运行环境尚未收到已完成的 Codex 模型列表请求",
+  doctorCatalogReady: "Codex 最近一次模型列表请求成功",
+  doctorCatalogFailed: "Codex 最近一次模型列表请求失败；本地运行环境可以连接",
   doctorTunnelBinaryInstalled: "已安装固定版本的 openai/tunnel-client 二进制文件",
   doctorTunnelKeyStored: "隧道运行时密钥已安全存储",
   doctorTunnelRuntimeOwned: "启动器正在管理隧道运行时",
@@ -535,7 +560,7 @@ const zh: Record<keyof typeof en, string> = {
   autoApproveToolsBody: "ChatGPT 请求使用所选 Codex 插件时，自动点击“允许一次”。Codex 的权限设置仍然有效。默认关闭。",
   manualAutoApproveUnavailable: "Zero Risk 模式不支持自动批准工具请求。",
   toolApprovalNeeded: "ChatGPT 需要你的批准",
-  toolApprovalPendingBody: "打开此聊天，选择“允许一次”或“拒绝”。一分钟内未回应的请求将被拒绝。",
+  toolApprovalPendingBody: "打开此聊天，选择“允许一次”或“拒绝”。要允许所有工具，请打开 ChatGPT 中的插件设置 → Permissions → Allow all actions。一分钟内未作出选择，任务将停止，不会自动点击任何按钮。",
   lockBrowserDuringTurns: "任务期间保护浏览器",
   lockBrowserDuringTurnsBody: "当 Codex 或 Claude Code 控制对话时，阻止直接操作 ChatGPT 页面。",
   language: "语言",
@@ -580,6 +605,7 @@ function baseCopyFor(language: Language): Copy {
   if (language === "zh-CN") return zh as Copy;
   if (language === "zh-TW") return { ...en, ...zhTW } as Copy;
   if (language === "ja") return ja as Copy;
+  if (language === "fr") return { ...en, ...fr } as Copy;
   if (language === "ko") return { ...en, ...ko } as Copy;
   return en;
 }
@@ -603,6 +629,11 @@ export function localizeRuntimeMessage(
       .replace("{pid}", () => match[2]!);
   }
   if (checkId === "codex" && message === "Codex native model route is installed") return copy.doctorCodexInstalled;
+  if (checkId === "model-catalog") {
+    if (message === "This runtime has not observed a completed Codex model-list request yet") return copy.doctorCatalogPending;
+    if (message === "Codex's latest model-list request succeeded") return copy.doctorCatalogReady;
+    if (message === "Codex's latest model-list request failed; the local runtime is reachable") return copy.doctorCatalogFailed;
+  }
   if (checkId === "service" && message === "Launcher owns the background runtime") return copy.doctorRuntimeOwned;
   if (checkId === "service" && message === "macOS background service is loaded") return copy.doctorMacServiceLoaded;
   if (checkId === "chrome") {

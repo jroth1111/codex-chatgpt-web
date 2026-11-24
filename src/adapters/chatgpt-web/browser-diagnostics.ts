@@ -1,7 +1,10 @@
+import { BrowserDiagnosticHistory } from "./browser-diagnostic-history";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
+import { chatGptResponseStructureLogEntries, chatGptResponseStructures } from "./browser-response-structure";
+import { chatGptInteractionState } from "./browser-interaction-state";
+import { CHATGPT_UI_VARIANT_SELECTORS, chatGptUiVariantCounts, validateChatGptUiVariantCounts } from "../../chatgpt-ui/observations";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
@@ -27,8 +30,6 @@ export function sanitizeChatGptBrowserDiagnosticState(value: unknown): unknown {
     return sanitized === undefined ? [] : [[key, sanitized]];
   }));
 }
-
-const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
 
 export async function readChatGptUpstreamFailureUiState(
   page: Page,
@@ -72,38 +73,8 @@ function diagnosticScreenshotMask(page: Page) {
     page.locator('[data-testid^="conversation-turn-"], [data-turn-key]'),
     page.locator(CHATGPT_COMPOSER_SELECTOR),
     page.locator('[role="dialog"], [role="alert"], [role="status"], [data-radix-popper-content-wrapper]'),
-    page.locator('[data-testid*="profile" i], [data-testid*="account" i], [aria-label*="profile" i], [aria-label*="account" i]'),
+    page.locator('[data-testid*="profile" i], [data-testid*="account" i], [aria-label*="profile" i], [aria-label*="account" i], [aria-label*="profil" i], [aria-label*="compte" i]'),
   ];
-}
-
-function privateDirectory(path: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  try { chmodSync(path, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
-}
-
-function pruneBrowserDiagnostics(root: string, current: string): void {
-  const attempts = readdirSync(root, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9_-]{6,128}$/.test(entry.name))
-    .map(entry => {
-      const path = join(root, entry.name);
-      return { path, traceId: entry.name.replace(/-[a-f0-9]{8}$/, ""), modifiedAt: statSync(path).mtimeMs };
-    })
-    .sort((left, right) => Number(right.path === current) - Number(left.path === current)
-      || right.modifiedAt - left.modifiedAt);
-  const traces = new Map<string, typeof attempts>();
-  for (const attempt of attempts) {
-    const group = traces.get(attempt.traceId) ?? [];
-    group.push(attempt);
-    traces.set(attempt.traceId, group);
-  }
-  // ponytail: ten logical traces, first and latest attempt only; expand only for proven diagnostic needs.
-  let index = 0;
-  for (const group of traces.values()) {
-    const keep = index++ < CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT ? new Set([group[0], group.at(-1)]) : new Set();
-    for (const attempt of group) {
-      if (!keep.has(attempt)) rmSync(attempt.path, { recursive: true, force: true });
-    }
-  }
 }
 
 function diagnosticError(error: unknown): string {
@@ -120,6 +91,7 @@ function verificationFailure(error: unknown): string {
 
 export class ChatGptBrowserDiagnostics {
   private readonly directory: string;
+  private readonly history: BrowserDiagnosticHistory;
   private sequence = 0;
   private initialized = false;
   private assistantTurnBinding?: ChatGptAssistantTurnBinding;
@@ -133,6 +105,12 @@ export class ChatGptBrowserDiagnostics {
       throw new Error("ChatGPT browser diagnostic trace id is invalid");
     }
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
+    this.history = new BrowserDiagnosticHistory(this.root, this.directory);
+  }
+
+  finish(status: "completed" | "failed"): void {
+    try { this.history.finish(status); }
+    catch { console.warn("[chatgpt-web] browser diagnostic retention failed"); }
   }
 
   bindAssistantTurn(binding: ChatGptAssistantTurnBinding): void {
@@ -155,17 +133,55 @@ export class ChatGptBrowserDiagnostics {
         stateError = this.contentFree ? verificationFailure(captureError) : diagnosticError(captureError);
       }
 
+      const responseStructure = await withChatGptBrowserObservationTimeout(
+        Promise.resolve().then(() => page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).evaluateAll(chatGptResponseStructures)),
+      ).catch(() => undefined);
+      const uiVariants = await withChatGptBrowserObservationTimeout(
+        page.evaluate(chatGptUiVariantCounts, CHATGPT_UI_VARIANT_SELECTORS),
+      ).then(validateChatGptUiVariantCounts).catch(() => undefined);
+      const failed = /turn-failed|response-stalled/.test(checkpoint);
+      // Verification remains content-free and normal captures avoid extra DOM work.
+      // Detailed actionability probes run only for a failing owned turn.
+      const interaction = failed && !this.contentFree
+        ? await withChatGptBrowserObservationTimeout(page.evaluate(chatGptInteractionState, {
+          selector: CHATGPT_EFFORT_CONTROL_SELECTOR,
+          sampleFrames: true,
+        })).catch(() => undefined)
+        : undefined;
+      const safeInteraction = interaction === undefined ? undefined : sanitizeChatGptBrowserDiagnosticState(interaction);
       const envelope: Record<string, unknown> = {
         version: 2,
         capturedAt,
         traceId: this.traceId,
         checkpoint,
+        ...(responseStructure ? { responseStructure } : {}),
+        ...(uiVariants ? { uiVariants } : {}),
+        ...(safeInteraction !== undefined ? { interaction: safeInteraction } : {}),
         ...(error !== undefined ? { error: this.contentFree ? verificationFailure(error) : diagnosticError(error) } : {}),
         state: sanitizeChatGptBrowserDiagnosticState(state),
         ...(stateError ? { stateError } : {}),
       };
       const jsonPath = join(this.directory, `${stem}.json`);
       this.writeEnvelope(jsonPath, envelope);
+
+      if (failed) {
+        if (uiVariants) console.info(`[chatgpt-web] ui_variants ${JSON.stringify({ traceId: this.traceId, checkpoint: stem, variants: uiVariants })}`);
+        console.info(`[chatgpt-web] page_state ${JSON.stringify({
+          traceId: this.traceId, checkpoint: stem,
+          ...(stateError ? { unavailable: true } : { state: sanitizeChatGptBrowserDiagnosticState(state) }),
+        }, (_key, value) => Array.isArray(value) && value.length > 40
+          ? { count: value.length, omitted: value.length - 40, recent: value.slice(-40) } : value)}`);
+        // Preserve bounded, content-free structural and actionability evidence
+        // when a failing renderer is replaced. Never log account or prompt text.
+        if (responseStructure) {
+          for (const entry of chatGptResponseStructureLogEntries(this.traceId, stem, responseStructure)) console.info(entry);
+        }
+        console.info(`[chatgpt-web] interaction_state ${JSON.stringify({
+          traceId: this.traceId,
+          checkpoint: stem,
+          ...(safeInteraction !== undefined ? { state: safeInteraction } : { unavailable: true }),
+        })}`);
+      }
 
       if (!this.contentFree && browserDiagnosticIncludesScreenshot(checkpoint)) {
         try {
@@ -192,9 +208,7 @@ export class ChatGptBrowserDiagnostics {
 
   private initialize(): void {
     if (this.initialized) return;
-    privateDirectory(this.root);
-    privateDirectory(this.directory);
-    pruneBrowserDiagnostics(this.root, this.directory);
+    this.history.start();
     this.initialized = true;
   }
 
@@ -215,8 +229,15 @@ async function captureVerificationCapabilities(page: Page): Promise<Record<strin
       [...root.querySelectorAll(selector)].some(rendered);
     const composers = [...document.querySelectorAll(selectors.composer)].filter(rendered);
     const composerForm = composers.length === 1 ? composers[0]!.closest("form") : null;
+    const effortControls = composerForm ? [...composerForm.querySelectorAll(selectors.effortControl)].filter(rendered) : [];
     return {
       composerVisible: composers.length === 1,
+      composerEditable: composers.length === 1 && (composers[0] instanceof HTMLTextAreaElement
+        ? !composers[0].matches(":disabled") && !composers[0].readOnly
+        : (composers[0] as HTMLElement).isContentEditable),
+      effortControlUnique: effortControls.length === 1,
+      effortControlExpanded: effortControls.length === 1 && effortControls[0]!.getAttribute("aria-expanded") === "true",
+      effortControlClosed: effortControls.length === 1 && effortControls[0]!.getAttribute("aria-expanded") === "false",
       connectorSelected: composerForm !== null
         && any('[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]', composerForm),
       mentionMenuVisible: any('.__menu-item[tabindex="0"][data-id^="plugin:"][data-keyword], .__menu-item[tabindex="0"] [data-id^="plugin:"][data-keyword], [data-mention-list-scroll-area] button[data-list-navigation-item="true"]'),

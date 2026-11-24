@@ -1,14 +1,17 @@
-import type { AdapterEvent, CodexParsedRequest, CodexToolResultMessage } from "../../types";
+import { createHash } from "node:crypto";
+import { namespacedToolName, type AdapterEvent, type CodexParsedRequest, type CodexToolCall, type CodexToolResultMessage } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
 import { ChatGptSteeringFeed, steeringFingerprint, type ClaudeSteeringDelivery } from "./steering-feed";
 import { ChatGptTextFeed, ChatGptTraceFeed } from "./turn-feeds";
 import { NativeAgentInputInbox } from "./native-agent-input";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
+import { NativeObserverHandoff } from "./native-observer-handoff";
 export { chatGptConversationKey, chatGptTurnTraceId } from "./conversation-key";
 export {
   chatGptCompactionSourceExecutionKey,
   chatGptTurnExecutionKey,
+  chatGptTurnRoundKey,
   chatGptTurnSteeringId,
 } from "./turn-execution-key";
 export { ChatGptSteeringFeed } from "./steering-feed";
@@ -19,6 +22,7 @@ export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
   | { type: "error"; error: Error };
 interface ChatGptTurnRuntimeBase {
+  setObserverConnected?: (connected: boolean) => boolean | Promise<boolean>;
   nativeIdentity?: { threadId: string; turnId: string };
   browser: Promise<string>;
   physicalSettlement?: Promise<void>;
@@ -42,20 +46,39 @@ export type ChatGptTurnRuntime =
   | (ChatGptTurnRuntimeBase & { mode: "tools"; token: Promise<string> })
   | (ChatGptTurnRuntimeBase & { mode: "read-only" });
 
+interface CanonicalToolEvidence {
+  generation: number;
+  revisionHash: string;
+  callHash: string;
+  resultHash?: string;
+}
+
+// Completion receipts retain hashes, not tool payloads; JSON object key order is not semantic.
+function canonicalDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest("hex");
+}
+
+function resultDigest(result: CodexToolResultMessage): string {
+  return canonicalDigest([result.toolCallId, namespacedToolName(result.toolNamespace, result.toolName), result.content, result.isError]);
+}
+
 export class ChatGptTurnSession {
   readonly nativeAgentInputs = new NativeAgentInputInbox();
+  readonly observerHandoff = new NativeObserverHandoff();
+  userRevisionKey(): string { return this.userRevision ?? ""; }
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
   readonly physicalSettlement: Promise<void>;
   private readonly outstandingById = new Map<string, BrokerToolRequest>();
   private outstandingBatchPublished = false;
-  private readonly deliveredResultIds = new Set<string>();
+  private readonly deliveredResults = new Map<string, CanonicalToolEvidence | undefined>();
   private outstandingReasoning: string[] = [];
   private finalReasoning: string[] = [];
   private outstandingPrelude: AdapterEvent[] = [];
   private finalPrelude: AdapterEvent[] = [];
-  private readonly outstandingGenerationById = new Map<string, number>();
+  private readonly outstandingEvidenceById = new Map<string, CanonicalToolEvidence>();
   private readonly supersededResultIds = new Map<string, number>();
   private canonicalGeneration = 0;
   private canonicalComplete = false;
@@ -70,6 +93,12 @@ export class ChatGptTurnSession {
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private physicalBrowserSettled = false;
   private tail: Promise<void> = Promise.resolve();
+  private readonly rounds = new Map<string, {
+    events: AdapterEvent[];
+    reasoning: string[];
+    completed: boolean;
+    failure?: Error;
+  }>();
 
   constructor(
     readonly runtime: ChatGptTurnRuntime,
@@ -102,6 +131,61 @@ export class ChatGptTurnSession {
         this.physicalBrowserSettled = true;
         throw error;
       });
+  }
+
+  roundEvents(key: string): AdapterEvent[] {
+    return [...this.round(key).events];
+  }
+
+  roundReasoning(key: string): string[] {
+    return [...this.round(key).reasoning];
+  }
+
+  appendRoundEvents(key: string, events: readonly AdapterEvent[]): void {
+    if (events.length === 0) return;
+    const round = this.round(key);
+    if (round.completed) throw new Error("cannot append to a completed ChatGPT native round");
+    round.events.push(...events);
+  }
+
+  appendRoundReasoning(key: string, values: readonly string[]): void {
+    if (values.length === 0) return;
+    const round = this.round(key);
+    if (round.completed) throw new Error("cannot append reasoning to a completed ChatGPT native round");
+    round.reasoning.push(...values);
+  }
+
+  completeRound(key: string): void {
+    this.round(key).completed = true;
+  }
+
+  failRound(key: string, error: Error): void {
+    const round = this.round(key);
+    round.failure = error;
+    round.completed = true;
+  }
+
+  roundCompleted(key: string): boolean {
+    return this.rounds.get(key)?.completed === true;
+  }
+
+  roundFailure(key: string): Error | undefined {
+    return this.rounds.get(key)?.failure;
+  }
+
+  private round(key: string) {
+    let round = this.rounds.get(key);
+    if (round) return round;
+    round = { events: [], reasoning: [], completed: false };
+    this.rounds.set(key, round);
+    while (this.rounds.size > 512) {
+      const oldestCompleted = [...this.rounds].find(([, candidate]) => candidate.completed);
+      if (!oldestCompleted) {
+        throw new Error("ChatGPT native round journal is full (512 unfinished rounds)");
+      }
+      this.rounds.delete(oldestCompleted[0]);
+    }
+    return round;
   }
 
   runExclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -141,14 +225,19 @@ export class ChatGptTurnSession {
   setOutstanding(requests: BrokerToolRequest[], reasoning: string[] = [], prelude: AdapterEvent[] = []): number | undefined {
     if (this.outstandingById.size > 0) throw new Error("cannot emit a new ChatGPT tool batch while the previous batch is unresolved");
     for (const request of requests) {
-      if (this.deliveredResultIds.has(request.callId) || this.outstandingById.has(request.callId)) {
+      if (this.deliveredResults.has(request.callId) || this.outstandingById.has(request.callId)) {
         throw new Error(`duplicate ChatGPT bridge tool call id: ${request.callId}`);
       }
       this.outstandingById.set(request.callId, request);
-      this.outstandingGenerationById.set(request.callId, this.canonicalGeneration);
+      this.outstandingEvidenceById.set(request.callId, { generation: this.canonicalGeneration,
+        revisionHash: canonicalDigest(this.userRevisionKey()),
+        callHash: canonicalDigest([request.callId, request.wireName,
+          request.freeform ? { input: request.input ?? "" } : request.arguments ?? {}]),
+      });
     }
     this.outstandingBatchPublished = false;
     this.setOutstandingEvents(reasoning, prelude);
+    if (requests.length > 0) this.runtime.trace.recordProgress();
     return this.runtime.externalProgress?.recordToolBatch(requests.length);
   }
 
@@ -168,11 +257,15 @@ export class ChatGptTurnSession {
 
   outstandingPublished(): boolean { return this.outstandingBatchPublished; }
 
+  completedToolResultCount(): number { return this.deliveredResults.size; }
+
   markResultDelivered(callId: string, result?: CodexToolResultMessage): void {
     if (!this.outstandingById.delete(callId)) throw new Error(`ChatGPT bridge tool result does not match an outstanding call: ${callId}`);
-    this.outstandingGenerationById.delete(callId);
-    this.deliveredResultIds.add(callId);
+    const evidence = this.outstandingEvidenceById.get(callId);
+    this.outstandingEvidenceById.delete(callId);
+    this.deliveredResults.set(callId, evidence && result ? { ...evidence, resultHash: resultDigest(result) } : undefined);
     this.runtime.externalProgress?.recordToolResult();
+    this.runtime.trace.recordProgress();
     this.runtime.onToolResultDelivered?.(result);
     if (this.outstandingById.size === 0) {
       this.outstandingBatchPublished = false;
@@ -198,7 +291,7 @@ export class ChatGptTurnSession {
   }
 
   setFinalEvents(events: AdapterEvent[]): void {
-    this.finalPrelude = [...events];
+    this.finalPrelude = events.filter(event => event.type !== "done" && event.type !== "error");
   }
 
   eventsForFinalReplay(): AdapterEvent[] {
@@ -266,12 +359,12 @@ export class ChatGptTurnSession {
   supersedeOutstanding(): string[] {
     const superseded = [...this.outstandingById.keys()];
     for (const callId of superseded) {
-      this.supersededResultIds.set(callId, this.outstandingGenerationById.get(callId) ?? this.canonicalGeneration);
+      this.supersededResultIds.set(callId, this.outstandingEvidenceById.get(callId)?.generation ?? this.canonicalGeneration);
       this.runtime.externalProgress?.recordToolResult();
     }
     this.outstandingById.clear();
     this.outstandingBatchPublished = false;
-    this.outstandingGenerationById.clear();
+    this.outstandingEvidenceById.clear();
     this.outstandingReasoning = [];
     this.outstandingPrelude = [];
     this.reconcileSupersededCalls();
@@ -295,6 +388,40 @@ export class ChatGptTurnSession {
       message.role === "toolResult" ? [message.toolCallId] : []
     )));
     this.reconcileSupersededCalls();
+  }
+
+  hasCanonicalToolResultEvidence(parsed: CodexParsedRequest): boolean {
+    if (!this.canonicalComplete || !parsed._canonicalContextComplete) return false;
+    const calls = new Map<string, CodexToolCall>();
+    const results = new Map<string, CodexToolResultMessage>();
+    for (const message of parsed.context.messages) {
+      if (message.role === "assistant") for (const part of message.content) {
+        if (part.type !== "toolCall") continue;
+        if (calls.has(part.id)) return false;
+        calls.set(part.id, part);
+      }
+      if (message.role === "toolResult") {
+        if (results.has(message.toolCallId)) return false;
+        results.set(message.toolCallId, message);
+      }
+    }
+    if (calls.size !== results.size) return false;
+    for (const id of calls.keys()) if (!results.has(id)) return false;
+    const revisionHash = canonicalDigest(this.userRevisionKey());
+    let currentWork = false;
+    const matches = (id: string, evidence: CanonicalToolEvidence | undefined): boolean => {
+      const call = calls.get(id), result = results.get(id);
+      if (!evidence || !call || !result || evidence.generation > this.canonicalGeneration) return false;
+      const wireName = namespacedToolName(call.namespace, call.name);
+      if (wireName !== namespacedToolName(result.toolNamespace, result.toolName)
+        || canonicalDigest([id, wireName, call.arguments]) !== evidence.callHash
+        || evidence.resultHash && resultDigest(result) !== evidence.resultHash) return false;
+      if (evidence.revisionHash === revisionHash) currentWork = true;
+      return true;
+    };
+    for (const [id, evidence] of this.outstandingEvidenceById) if (!matches(id, evidence)) return false;
+    for (const [id, evidence] of this.deliveredResults) if (!evidence?.resultHash || !matches(id, evidence)) return false;
+    return currentWork;
   }
 
   unresolvedSupersededResultIds(): string[] { return [...this.supersededResultIds.keys()]; }
@@ -323,5 +450,5 @@ export class ChatGptTurnSession {
     }
   }
 
-  cancel(reason?: Error): void { this.runtime.cancel(reason); }
+  cancel(reason?: Error): void { this.observerHandoff.cancel(); this.runtime.cancel(reason); }
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CodexParsedRequest } from "../../types";
-import { chatGptTurnExecutionKey } from "./turn-execution-key";
+import { chatGptTurnExecutionKey, chatGptTurnPurpose } from "./turn-execution-key";
 import { currentTurnUserRevision } from "./turn-user-revision";
 import { extractChatGptTurnIdentity } from "./environment";
 
@@ -29,7 +29,7 @@ export function chatGptTurnRetryKey(parsed: CodexParsedRequest): string {
   return createHash("sha256").update(JSON.stringify({
     threadId: identity.threadId,
     turnId: identity.turnId,
-    purpose: parsed._compactionRequest ? "compaction" : "response",
+    purpose: chatGptTurnPurpose(parsed),
     ...(requestHash ? { claudeRequestHash: requestHash } : {}),
   })).digest("hex");
 }
@@ -47,5 +47,25 @@ export function chatGptPromptFailureKey(parsed: CodexParsedRequest): string {
     revision,
     context: { ...parsed.context, messages: parsed.context.messages.map(({ timestamp: _timestamp, ...message }) => message) },
     options: parsed.options,
+  })).digest("hex");
+}
+
+/** A native reconnect may refresh harness context, but must not resend a rejected user revision. */
+export function chatGptModelFailureKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  const executionKey = chatGptTurnExecutionKey(parsed); // validates native identity and complete compaction input
+  const compaction = parsed._compactionRequest || parsed._localCompactionRequest;
+  return createHash("sha256").update(JSON.stringify({
+    executionKey: compaction ? {
+      turn: chatGptTurnRetryKey(parsed), modelId: parsed.modelId,
+      modelFamily: parsed._chatgptModelFamily, reasoning: parsed.options.reasoning,
+    } : executionKey,
+    revision: compaction
+      ? (parsed._rawBody as { input: unknown[] }).input.filter(item => {
+          // Refreshed harness instructions do not authorize resending a rejected compact turn.
+          const role = item && typeof item === "object" ? (item as { role?: unknown }).role : undefined;
+          return role !== "developer" && role !== "system";
+        })
+      : currentTurnUserRevision(parsed._rawBody, identity.turnId!),
   })).digest("hex");
 }

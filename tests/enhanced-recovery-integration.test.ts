@@ -137,9 +137,10 @@ for (const profile of ["Pro", "Plus", "Luna"] as const) test(`${profile} uses on
       expect(text).not.toContain("codex.control.recovery_checkpoint");
     } else {
       expect(text).toContain("codex.control.recovery_checkpoint");
-      const control = text.match(/turn_token (control_[A-Za-z0-9_-]+)/)?.[1];
+      const control = text.match(/turn_token (turn_[a-f0-9]{32})/)?.[1];
       const handoffId = text.match(/"handoff_id":"(handoff_[A-Za-z0-9_-]+)"/)?.[1];
       if (!control || !handoffId) throw new Error("recovery checkpoint binding missing");
+      expect(control).not.toBe(token);
       await callTurnBroker(socketPath, {
         method: "submit_recovery_checkpoint", token: control, handoffId,
         summary: "Checkpoint: inspection complete; continue task.",
@@ -160,6 +161,10 @@ for (const profile of ["Pro", "Plus", "Luna"] as const) test(`${profile} uses on
     continuation.context.messages.push(
       { role: "assistant", content: [{ type: "toolCall", id: call!.id, name: "exec_command", arguments: { cmd: "inspect" } }], timestamp: 3 },
       { role: "toolResult", toolCallId: call!.id, toolName: "exec_command", content: "canonical tool result", isError: false, timestamp: 4 },
+    );
+    (continuation._rawBody as { input: unknown[] }).input.push(
+      { type: "function_call", call_id: call!.id, name: "exec_command", arguments: JSON.stringify({ cmd: "inspect" }) },
+      { type: "function_call_output", call_id: call!.id, output: "canonical tool result" },
     );
     const finalEvents: AdapterEvent[] = [];
     await adapter.runTurn!(continuation, { headers: new Headers() }, event => finalEvents.push(event));

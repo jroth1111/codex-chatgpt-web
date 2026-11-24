@@ -11,7 +11,7 @@ import {
   CHATGPT_TEMPORARY_CHAT_URL,
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
-import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import { parseChatGptWebModelCapabilities, type ChatGptWebModelCapabilities, type ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
@@ -19,6 +19,7 @@ export interface BrowserLoginResult {
   solAvailable: boolean;
   extraHighAvailable: boolean;
   proAvailable: boolean;
+  modelCapabilities?: ChatGptWebModelCapabilities;
 }
 
 import { sanitizeBrowserLoginStorageState, type BrowserLoginStorageState } from "./browser-login-storage";
@@ -39,6 +40,7 @@ export interface SystemBrowserLoginCapture {
 interface SystemBrowserLoginOptions {
   continuation: Promise<void>;
   timeoutMs?: number;
+  onBrowserReady?: () => void;
 }
 
 interface LoginVerificationMarker {
@@ -48,10 +50,12 @@ interface LoginVerificationMarker {
   solAvailable?: boolean;
   extraHighAvailable?: boolean;
   proAvailable?: boolean;
+  modelCapabilities?: ChatGptWebModelCapabilities;
 }
 
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const SYSTEM_LOGIN_STOP_TIMEOUT_MS = 5_000;
+const LOGIN_STORAGE_ROOT_DOMAINS = ["chatgpt.com", "openai.com"] as const;
 const CHATGPT_ORIGIN = new URL(CHATGPT_TEMPORARY_CHAT_URL).origin;
 
 function browserProcessExited(browser: ChildProcess): boolean {
@@ -190,6 +194,7 @@ async function inspectStoredState(
           solAvailable: config.solAvailable,
           extraHighAvailable: config.extraHighAvailable === true,
           proAvailable: config.proAvailable,
+          modelCapabilities: config.modelCapabilities,
         }
         : await detectChatGptAccountCapabilities(verifierPage);
       return { ...capabilities, url: verifierPage.url() };
@@ -209,6 +214,7 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
     solAvailable: inspected.solAvailable,
     extraHighAvailable: inspected.extraHighAvailable === true,
     proAvailable: inspected.proAvailable,
+    modelCapabilities: inspected.modelCapabilities,
   };
 }
 
@@ -222,6 +228,7 @@ export function storedBrowserLoginCapabilities(
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
       ...(typeof marker.extraHighAvailable === "boolean" ? { extraHighAvailable: marker.extraHighAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
+      modelCapabilities: parseChatGptWebModelCapabilities(marker.modelCapabilities),
     };
   } catch {
     return {};
@@ -255,7 +262,7 @@ export async function captureSystemBrowserLogin(
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   try { chmodSync(profileDir, 0o700); } catch {}
   process.stdout.write(
-    "Sign in with your passkey in the dedicated Chrome window. When Temporary Chat is ready, return to Codex Web GPT and choose Continue.\n",
+    "Sign in with your passkey in the dedicated Chrome window. When ChatGPT is ready, return to Codex Web GPT and choose Continue.\n",
   );
 
   let capture: SystemBrowserLoginCapture | undefined;
@@ -275,6 +282,9 @@ export async function captureSystemBrowserLogin(
     try {
       await new Promise<void>((resolve, reject) => {
         timeout = setTimeout(() => reject(new Error("Timed out waiting for passkey sign-in")), remainingTime());
+        loginBrowser.once("spawn", () => {
+          try { options.onBrowserReady?.(); } catch (error) { reject(error); }
+        });
         void options.continuation.then(() => {
           continuationRequested = true;
           if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
@@ -450,6 +460,7 @@ export async function loginToChatGpt(
         solAvailable: inspected.solAvailable,
         extraHighAvailable: inspected.extraHighAvailable === true,
         proAvailable: inspected.proAvailable,
+        modelCapabilities: inspected.modelCapabilities,
       };
     } finally {
       await context.close();

@@ -1,5 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
+import { isNativeOpenPageContext } from "../../responses/native-context";
+import { isNativeAgentsMdContext } from "../../responses/native-context";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { effectiveChatGptToolPolicy } from "./tool-policy";
 import {
@@ -48,6 +50,25 @@ export interface ChatGptTurnEnvironment {
   writableRoots: string[];
   sandboxPolicy: ChatGptSandboxPolicy;
   tools: CodexTool[];
+}
+
+export interface ChatGptEnvironmentClaim {
+  environment: Omit<ChatGptTurnEnvironment, "cwd"> & { cwd?: string };
+  /** Filesystem permission envelopes omit the native turn's network policy. */
+  statesNetworkAccess: boolean;
+}
+
+export interface ChatGptCalendarEnvironmentDelta {
+  afterEnvironmentIndex: number;
+  workspaceRoots: string[][];
+  filesystemProfiles: string[];
+}
+
+function environmentClaim(parsed: CodexParsedRequest, text: string): ChatGptEnvironmentClaim {
+  return {
+    environment: parseChatGptEnvironmentText(parsed, text),
+    statesNetworkAccess: /<network_access\b/i.test(text) || /network access is /i.test(text),
+  };
 }
 export interface ChatGptTurnUserRevision {
   content: unknown;
@@ -121,6 +142,7 @@ function currentEnvironmentAttempts(parsed: CodexParsedRequest): Array<{ item: R
     const item = record(value);
     if (!hasEnvironmentContextFragment(item)) return [];
     const owner = itemTurnId(item);
+    if (owner !== undefined && owner !== turnId && CALENDAR_ENVIRONMENT_DELTA.test(rawMessageText(item).trim())) return [];
     const current = owner === turnId
       || currentInstructions.some(instruction => instruction < index)
       || structurallyFollowedByCurrentContext(index);
@@ -176,43 +198,64 @@ export function extractChatGptTurnUserText(parsed: CodexParsedRequest): string |
   return text || undefined;
 }
 
-function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision | undefined {
-  return turnUserRevisionHistory(parsed._rawBody).at(-1)
-    ?? recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed))?.source;
+function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, recoverCheckpoint = true): ChatGptTurnUserRevision | undefined {
+  return (recoverCheckpoint ? chatGptTurnUserRevisionHistory(parsed) : turnUserRevisionHistory(parsed._rawBody)).at(-1);
 }
 
 export function chatGptTurnUserRevisionHistory(parsed: CodexParsedRequest): ChatGptTurnUserRevision[] {
   const revisions = turnUserRevisionHistory(parsed._rawBody);
-  const recovered = revisions.length === 0 ? recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed)) : undefined;
-  return recovered ? [recovered.source] : revisions;
+  const identity = extractChatGptTurnIdentity(parsed);
+  const recovered = recoverCompactionInstruction(parsed, identity);
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  if (recovered?.sourceWasSyntheticInstruction) {
+    const retained = turnUserRevisionHistory({ ...body, input: input.slice(0, recovered.summaryIndex) }).at(-1);
+    if (!retained || isAcceptedCompactionContinuation(parsed, identity, retained)) {
+      return [recovered.source, ...turnUserRevisionHistory({ ...body, input: input.slice(recovered.summaryIndex + 1) })];
+    }
+  }
+  return revisions.length > 0 ? revisions : recovered ? [recovered.source] : [];
 }
 
 /** The instruction summarized by a compaction request may belong to its source turn. */
-export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
+export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest, options: { recoverCheckpoint?: boolean } = {}): ChatGptTurnUserRevision {
   if (!parsed._compactionRequest && !parsed._localCompactionRequest) {
     throw new Error("ChatGPT web compaction source requires a compaction request");
   }
-  const revision = latestChatGptTurnUserRevision(parsed);
+  const revision = latestChatGptTurnUserRevision(parsed, options.recoverCheckpoint !== false);
   if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
   return revision;
 }
 
-/** A completed checkpoint binds an older instruction to this exact continuing native turn. */
+/** A retained representation can have context but no instruction; it adds no source alias. */
+export function findChatGptCompactionSourceRevision(
+  parsed: CodexParsedRequest,
+  options: { recoverCheckpoint?: boolean } = {},
+): ChatGptTurnUserRevision | undefined {
+  if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
+  return latestChatGptTurnUserRevision(parsed, options.recoverCheckpoint !== false);
+}
+
+/** A completed checkpoint identifies the current turn's rebuilt environment preamble. */
 export function isChatGptCompactionContinuation(parsed: CodexParsedRequest): boolean {
   const identity = extractChatGptTurnIdentity(parsed);
   const revision = latestChatGptTurnUserRevision(parsed);
   return revision?.turnId !== undefined && identity.turnId !== undefined
-    && revision.turnId !== identity.turnId
     && !priorAbortedTurnIds(parsed._rawBody, identity.turnId ?? "").includes(revision.turnId)
-    && isAcceptedCompactionContinuation(parsed, identity, revision);
+    // Pre-turn compaction can append the new instruction after the checkpoint. It still
+    // rebuilds the preamble before the retained older instruction; the store must validate
+    // that claim against the current native rollout just as for an older-source continuation.
+    && (revision.turnId === identity.turnId
+      ? recoverCompactionInstruction(parsed, identity) !== undefined
+      : isAcceptedCompactionContinuation(parsed, identity, revision));
 }
 
-const CALENDAR_ENVIRONMENT_DELTA = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/;
+const CALENDAR_ENVIRONMENT_DELTA = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>((?:\s*<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?(<permission_profile type="(?:disabled|managed)">[\s\S]*?<\/permission_profile>)\s*<\/filesystem>\s*(?:<subagents>\s*(?:<agent name="[^<>"\r\n]+"\s*\/>\s*)*<\/subagents>\s*)?<\/environment_context>$/;
 
 /** Parse a claim only: the caller must compare it with this turn's native rollout authority. */
 export function extractChatGptContinuationEnvironmentClaims(
-  parsed: CodexParsedRequest, provenCalendarDelta = false,
-): ChatGptTurnEnvironment[] {
+  parsed: CodexParsedRequest, provenCalendarDelta?: ChatGptCalendarEnvironmentDelta,
+): ChatGptEnvironmentClaim[] {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
@@ -227,7 +270,8 @@ export function extractChatGptContinuationEnvironmentClaims(
     if (isCurrentTurnInstruction(item, metadata, turnId ?? "") || index === revisionIndex) currentInstructions.push(index);
   }
   const updates = currentEnvironmentAttempts(parsed).flatMap(({ item, index }) => {
-    if (provenCalendarDelta && CALENDAR_ENVIRONMENT_DELTA.test(rawMessageText(item).trim())) return [];
+    if (provenCalendarDelta && index > provenCalendarDelta.afterEnvironmentIndex
+      && CALENDAR_ENVIRONMENT_DELTA.test(rawMessageText(item).trim())) return [];
     if (item.role !== "user") {
       throw new Error("Compaction continuation contains an unowned current native environment claim");
     }
@@ -244,7 +288,10 @@ export function extractChatGptContinuationEnvironmentClaims(
     const pureContextBundle = parts.length > 1 && parts.every(value => (
       typeof value === "string" && isPureContextualCodexUserText(value)
     ));
-    if (owner === undefined && serverOwnedId && !pureContextBundle) {
+    const initialPartialContext = owner === undefined && parts.length === 1 && typeof parts[0] === "string"
+      && parts[0].trim() === rawEnvironmentText(parsed)
+      && environmentClaim(parsed, parts[0]).environment.cwd === undefined;
+    if (owner === undefined && serverOwnedId && !pureContextBundle && !initialPartialContext) {
       throw new MissingTrustedCodexEnvironmentError("cwd");
     }
     if (owner !== undefined && owner !== turnId) {
@@ -255,9 +302,11 @@ export function extractChatGptContinuationEnvironmentClaims(
     ))) {
       throw new Error("Compaction continuation mixes a current native environment refresh with other content");
     }
-    return parts.filter((value): value is string => (
+    const environments = parts.filter((value): value is string => (
       typeof value === "string" && hasEnvironmentContextAttempt(value)
     ));
+    if (environments.length > 1) throw new Error("Compaction continuation repeats a current native environment claim");
+    return environments;
   });
   if (updates.length === 0 && !provenCalendarDelta) throw new Error("Compaction continuation requires a current native environment claim");
   return updates.map(text => {
@@ -265,8 +314,47 @@ export function extractChatGptContinuationEnvironmentClaims(
     if (!/^<environment_context>[\s\S]*<\/environment_context>$/.test(update)) {
       throw new Error("Compaction continuation contains a malformed current native environment claim");
     }
-    return parseChatGptEnvironmentText(parsed, update);
+    return environmentClaim(parsed, update);
   });
+}
+
+/**
+ * Pre-turn native compaction can rebuild the current preamble before retained older
+ * instructions, without a bridge-owned checkpoint. These items are claims only;
+ * the rollout reader must match both against its latest native replacement history.
+ */
+export function extractChatGptNativeCompactionEnvironment(parsed: CodexParsedRequest): {
+  claim: ChatGptEnvironmentClaim;
+  items: Record<string, unknown>[];
+} | undefined {
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  if (!turnId) return undefined;
+  const claims = input.flatMap((value, index) => {
+    const item = record(value);
+    return hasEnvironmentContextFragment(item) && (itemTurnId(item) === undefined || itemTurnId(item) === turnId)
+      ? [{ item, index }] : [];
+  });
+  if (claims.length !== 1) return undefined;
+  const { item, index } = claims[0]!;
+  const kinds = record(item.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+  if (itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id
+    || !Array.isArray(kinds) || !kinds.includes("environments.environment_context")) return undefined;
+  const checkpoints = input.flatMap((value, index) => {
+    const item = record(value);
+    return item?.type === "compaction" ? [{ item, index }] : [];
+  });
+  if (checkpoints.length !== 1) return undefined;
+  const checkpoint = checkpoints[0]!;
+  const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), clientTurnMetadata(parsed)));
+  if (checkpoint.index <= index || activeIndex <= checkpoint.index
+    || itemTurnId(input[activeIndex]) !== turnId
+    || typeof checkpoint.item.id !== "string" || !checkpoint.item.id
+    || typeof checkpoint.item.encrypted_content !== "string" || !checkpoint.item.encrypted_content) return undefined;
+  const currentClaims = extractChatGptContinuationEnvironmentClaims(parsed);
+  if (currentClaims.length !== 1) return undefined;
+  return { claim: currentClaims[0]!, items: [item, checkpoint.item] };
 }
 
 /**
@@ -274,7 +362,7 @@ export function extractChatGptContinuationEnvironmentClaims(
  * Git workspace metadata need not list every native filesystem root. Return that earlier claim
  * only for a same-turn pair; the store must compare it with the current canonical rollout.
  */
-export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedRequest): ChatGptTurnEnvironment | undefined {
+export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim | undefined {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!turnId) return undefined;
   const body = record(parsed._rawBody);
@@ -303,44 +391,75 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
     const instruction = record(input[index]);
     if (typeof instruction?.id !== "string" || !instruction.id) continue;
     const text = environmentBeforeUser(input, index, turnId, metadata);
-    if (text) return parseChatGptEnvironmentText(parsed, text);
+    if (text) return environmentClaim(parsed, text);
   }
   return undefined;
 }
 
 /**
  * Native world-state diffs omit unchanged cwd/shell at midnight but repeat the filesystem
- * profile. Recognize the observed unrestricted calendar fragment as a claim only: the store
+ * profile. Recognize the calendar fragment as a claim only: the store
  * still requires this exact turn's native rollout and corroborating current sandbox metadata.
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
-export function hasChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): boolean {
+export function extractChatGptCalendarEnvironmentDelta(
+  parsed: CodexParsedRequest,
+  options?: { afterEnvironmentIndex: number },
+): ChatGptCalendarEnvironmentDelta | undefined {
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
-  if (!metadata || !turnId) return false;
+  if (!metadata || !turnId) return undefined;
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
-  const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), metadata));
+  const activeIndex = options?.afterEnvironmentIndex
+    ?? input.findLastIndex(value => isNativeInstruction(record(value), metadata));
   const active = record(input[activeIndex]);
-  if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return false;
+  if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return undefined;
+  if (options) {
+    const kinds = record(active.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+    if (active.type !== "message" || active.role !== "user" || !Array.isArray(kinds)
+      || !kinds.includes("environments.environment_context")) return undefined;
+  }
 
   let deltas = 0;
+  const workspaceRoots: string[][] = [];
+  const filesystemProfiles: string[] = [];
   for (let index = activeIndex + 1; index < input.length; index += 1) {
     const item = record(input[index]);
     if (!hasEnvironmentContextFragment(item)) continue;
-    if (item.role !== "user" || itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id
-      || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return false;
+    if (itemTurnId(item) !== undefined && itemTurnId(item) !== turnId) continue;
+    if (item.role !== "user" || itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id) return undefined;
     const text = rawMessageText(item).trim();
-    // Match the whole native fragment, not just the presence of a disabled profile: another
+    // Match the whole native fragment, not just the presence of a permission profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
-    if (!CALENDAR_ENVIRONMENT_DELTA.test(text)
+    // Native midnight updates can also repeat a worker inventory. Its exact name-only
+    // shape is contextual; it grants neither filesystem authority nor child ownership.
+    const match = CALENDAR_ENVIRONMENT_DELTA.exec(text);
+    if (!match
       || !sandboxMetadataMatchesEnvironment(canonicalSandboxMetadata(metadata), text)
       || [metadata.sandbox_mode, metadata.sandbox].some(value => (
         value !== undefined && !sandboxMetadataMatchesEnvironment(value, text)
-      ))) return false;
+      ))) return undefined;
+    // Compare the complete rendered profile against the native record in the store.
+    // Only insignificant whitespace between XML tags is normalized.
+    filesystemProfiles.push(match[2]!.replace(/>\s+</g, "><"));
+    if (match[1]) {
+      let roots: string[];
+      try { roots = [...match[1].matchAll(/<root>([^<]+)<\/root>/g)].map(root => decodeXmlText(root[1]!.trim())); }
+      catch { return undefined; }
+      if (roots.some(root => !isAbsolute(root))) return undefined;
+      workspaceRoots.push([...new Set(roots.map(pathIdentity))]);
+    }
     deltas += 1;
   }
-  return deltas > 0;
+  // A native delta may precede the first assistant response (#812). Its current-turn
+  // attribution permits verification, never authority: all repeated roots must agree
+  // with the current rollout before the store can accept this update.
+  return deltas > 0 ? { afterEnvironmentIndex: activeIndex, workspaceRoots, filesystemProfiles } : undefined;
+}
+
+function isPassivePageContext(item: Record<string, unknown> | undefined): boolean {
+  return isNativeOpenPageContext(item);
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {
@@ -353,7 +472,7 @@ function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurn
 
   let candidateIndex = userIndex - 1;
   let candidate = record(input[candidateIndex]);
-  while (candidate?.type === "message" && candidate.role === "developer") {
+  while (candidate && ((candidate.type === "message" && candidate.role === "developer") || isPassivePageContext(candidate))) {
     const developerTurnId = itemTurnId(candidate);
     if (developerTurnId !== userTurnId) return undefined;
     candidateIndex -= 1;
@@ -414,22 +533,17 @@ function environmentMatchesCanonicalMetadata(
   if (metadataRoots.some(path => !isAbsolute(path))) return false;
   const normalizedMetadataRoots = [...new Set(metadataRoots.map(pathIdentity))];
 
-  let cwdMatches: string[];
+  let paths: ReturnType<typeof environmentPaths>;
   try {
-    cwdMatches = environmentCwdMatches(environmentText, normalizedMetadataRoots)
-      .map(value => decodeXmlText(value.trim()));
+    paths = environmentPaths(environmentText, normalizedMetadataRoots);
   } catch {
     return false;
   }
-  if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) return false;
-  const rootMatches = [...environmentText.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
-    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
-  const declaredRootValues = rootMatches.length > 0 ? rootMatches : cwdMatches;
-  if (declaredRootValues.some(path => !isAbsolute(path))) return false;
-  const declaredRoots = [...new Set(declaredRootValues.map(pathIdentity))];
-  const cwd = pathIdentity(cwdMatches[0]!);
-  if (normalizedMetadataRoots.length > 0
-    && !normalizedMetadataRoots.some(root => matchesPath(root, cwd))) return false;
+  const declaredRoots = paths.roots.map(pathIdentity);
+  // Without a stated cwd this is only a partial claim. The store must obtain
+  // the cwd from the current native rollout and validate its workspace metadata.
+  if (paths.cwd !== undefined && normalizedMetadataRoots.length > 0
+    && !normalizedMetadataRoots.some(root => matchesPath(root, paths.cwd!))) return false;
   if (requireMetadataBoundRoots && (
     normalizedMetadataRoots.length === 0
     || declaredRoots.some(root => (
@@ -437,7 +551,6 @@ function environmentMatchesCanonicalMetadata(
       && !isCurrentOrParentThreadVisualizationRoot(root, metadata)
     ))
   )) return false;
-  if (!declaredRoots.some(root => matchesPath(root, cwd))) return false;
   return sandboxMetadataMatchesEnvironment(metadataSandboxValue, environmentText);
 }
 
@@ -478,7 +591,8 @@ function canonicalMetadataEnvironmentBefore(
 
   let candidateIndex = anchorIndex - 1;
   let candidate = record(input[candidateIndex]);
-  while (candidate?.type === "message" && (candidate.role === "developer" || compactionSummaryMessage(candidate))) {
+  while (candidate && ((candidate.type === "message" && (candidate.role === "developer" || compactionSummaryMessage(candidate)))
+    || isPassivePageContext(candidate))) {
     const developerTurnId = itemTurnId(candidate);
     const serverOwnedId = typeof candidate.id === "string" && candidate.id.length > 0;
     if (developerTurnId === undefined ? !serverOwnedId : developerTurnId !== metadataTurnId) return undefined;
@@ -497,7 +611,7 @@ function canonicalMetadataEnvironmentBefore(
     if (!/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) continue;
     // Current Codex stamps server-owned item IDs but not per-item turn IDs on the initial request,
     // and canonical workspaces contains Git enrichment rather than filesystem authority. Bind the
-    // structurally adjacent context (allowing only provenance-checked developer messages) to
+    // structurally adjacent context (allowing provenance-checked developer and native page items) to
     // canonical turn/sandbox metadata; when Git roots are present, require the primary cwd to agree
     // with them as an additional check.
     if (!environmentMatchesCanonicalMetadata(trimmed, metadata, requireMetadataBoundRoots)) continue;
@@ -640,22 +754,48 @@ function trustedEnvironmentText(parsed: CodexParsedRequest): string {
 }
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
-  return parseChatGptEnvironmentText(parsed, trustedEnvironmentText(parsed));
+  const environment = extractChatGptTurnEnvironmentClaim(parsed).environment;
+  if (environment.cwd === undefined) throw new MissingTrustedCodexEnvironmentError("cwd");
+  if (!environment.roots.some(root => matchesPath(root, environment.cwd!))) {
+    throw new MissingTrustedCodexEnvironmentError("current native worktree authority");
+  }
+  return { ...environment, cwd: environment.cwd };
 }
 
-function parseChatGptEnvironmentText(parsed: CodexParsedRequest, text: string): ChatGptTurnEnvironment {
-  const cwdMatches = environmentCwdMatches(text, clientMetadataWorkspaceRoots(parsed));
+export function extractChatGptTurnEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim {
+  return environmentClaim(parsed, trustedEnvironmentText(parsed));
+}
+
+function environmentPaths(text: string, preferredRoots: string[]): { cwd?: string; roots: string[] } {
+  const cwdMatches = environmentCwdMatches(text, preferredRoots);
+  const rootSections = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)];
+  const rootMatches = rootSections
+    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
+  if (cwdMatches.length === 0) {
+    // Only a well-formed filesystem-only update may omit cwd. Malformed cwd,
+    // ambiguous environments, and incomplete root lists remain invalid claims.
+    if (/<\/?(?:cwd|environments)\b/i.test(text) || rootSections.length !== 1 || rootMatches.length === 0
+      || [...text.matchAll(/<workspace_roots\b[^>]*>/gi)].length !== 1
+      || [...text.matchAll(/<\/workspace_roots\s*>/gi)].length !== 1
+      || [...rootSections[0]![0].matchAll(/<root\b[^>]*>/gi)].length !== rootMatches.length
+      || [...rootSections[0]![0].matchAll(/<\/root\s*>/gi)].length !== rootMatches.length) {
+      throw new MissingTrustedCodexEnvironmentError("cwd");
+    }
+    return { roots: uniqueAbsolutePaths(rootMatches, "workspace_roots") };
+  }
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
   if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;
-
-  const rootMatches = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
-    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
   const roots = rootMatches.length > 0 ? uniqueAbsolutePaths(rootMatches, "workspace_roots") : [cwd];
-  if (!roots.some(root => matchesPath(root, cwd))) {
+  if (!roots.some(root => matchesPath(root, cwd)) && sandboxTypeFromEnvironment(text) !== "dangerFullAccess") {
     throw new Error("ChatGPT web cwd is outside the trusted Codex workspace roots");
   }
+  return { cwd, roots };
+}
 
+function parseChatGptEnvironmentText(parsed: CodexParsedRequest, text: string): ChatGptEnvironmentClaim["environment"] {
+  const paths = environmentPaths(text, clientMetadataWorkspaceRoots(parsed));
+  const { roots } = paths;
   const sandboxType = sandboxTypeFromEnvironment(text);
   const networkAccess = /<network_access>enabled<\/network_access>/i.test(text) || /network access is enabled/i.test(text);
   const tools = effectiveChatGptToolPolicy(parsed).tools;
@@ -664,16 +804,21 @@ function parseChatGptEnvironmentText(parsed: CodexParsedRequest, text: string): 
     throw new Error("ChatGPT web turn requires one explicit trusted Codex sandbox mode");
   }
   if (sandboxType === "dangerFullAccess") {
-    return { cwd, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, tools };
+    return { ...paths, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, tools };
   }
   if (sandboxType === "workspaceWrite") {
     return {
-      cwd,
-      roots,
+      ...paths,
       writableRoots: roots,
       sandboxPolicy: { type: "workspaceWrite", writableRoots: roots, networkAccess },
       tools,
     };
   }
-  return { cwd, roots, writableRoots: [], sandboxPolicy: { type: "readOnly", networkAccess }, tools };
+  return { ...paths, writableRoots: [], sandboxPolicy: { type: "readOnly", networkAccess }, tools };
+}
+
+/** Native lifecycle marker; ordinary user prose cannot request a prediction. */
+export function isCodexComposerPrediction(value: unknown): boolean {
+  const metadata = codexTurnMetadataFromBody(value);
+  return metadata?.request_kind === "turn" && metadata.turn_trigger === "composer_predictions";
 }

@@ -1,3 +1,4 @@
+import { spyOn } from "bun:test";
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mock } from "node:test";
@@ -52,10 +53,47 @@ function fixture(active = false, tools = false) {
 }
 
 function submitCompaction(store: CompactionTransactionStore, instruction: string, summary: string): void {
-  const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+  const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
   const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
   store.submit(token, handoffId, summary);
 }
+
+test.each([false, true])("source compaction renews only positive activity, hidden=%s", async hidden => {
+  const f = fixture(true);
+  f.release.resolve();
+  const store = new CompactionTransactionStore();
+  const broker = {
+    beginCompactionTransaction: async (trace: string, ttl: number) => store.begin(trace, ttl),
+    waitForCompactionHandoff: (token: string, signal?: AbortSignal) => store.wait(token, signal),
+    abortCompactionTransaction: (token: string) => store.abort(token),
+  } as unknown as TurnBroker;
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const clockNow = spyOn(performance, "now").mockImplementation(() => Date.now());
+  const run = runEnhancedCompaction({ ...f.options, broker, timeoutMs: 40,
+    worker: { run: async turn => {
+      const prepared = await turn.prepare();
+      submitCompaction(store, prepared.text, "Complete activity-aware summary.");
+      prepared.release();
+      return "turn complete";
+    } },
+  });
+  void run.catch(() => {});
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    mock.timers.tick(25);
+    if (hidden) f.source.runtime.trace.signalProgress();
+    else f.source.runtime.trace.recordProgress();
+    mock.timers.tick(25);
+    f.browser.resolve("Source completed");
+    if (hidden) await expect(run).rejects.toThrow("compaction did not fully settle");
+    else expect(await run).toBe("completed");
+  } finally {
+    clockNow.mockRestore();
+    mock.timers.reset();
+    await f.cleanup();
+    await run.catch(() => {});
+  }
+});
 
 test("source settlement reserves a full separate deadline for retained compaction", async () => {
   const f = fixture(true);
@@ -67,7 +105,8 @@ test("source settlement reserves a full separate deadline for retained compactio
     abortCompactionTransaction: (token: string) => store.abort(token),
   } as unknown as TurnBroker;
   const events: AdapterEvent[] = [];
-  mock.timers.enable({ apis: ["setTimeout"] });
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const clockNow = spyOn(performance, "now").mockImplementation(() => Date.now());
   let run: ReturnType<typeof runEnhancedCompaction> | undefined;
   try {
     run = runEnhancedCompaction({ ...f.options, broker, timeoutMs: 40,
@@ -88,6 +127,7 @@ test("source settlement reserves a full separate deadline for retained compactio
     expect(events.some(event => event.type === "text_delta"
       && event.text.includes("Retained summary after source settled."))).toBeTrue();
   } finally {
+    clockNow.mockRestore();
     mock.timers.reset();
     await f.cleanup();
     await run?.catch(() => {});
@@ -106,7 +146,7 @@ for (const sourceSettlement of ["handoff", "final", "missing_completion_evidence
   let fallbackCalls = 0;
   let workerCalls = 0;
   const submit = (instruction: string) => {
-    const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+    const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
     const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
     store.submit(token, handoffId, "Canonical active checkpoint.");
   };
@@ -193,7 +233,7 @@ test("active compact stops browser observation as soon as its structured checkpo
   });
   try {
     const instruction = await boundary.promise;
-    const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+    const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
     const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
     store.submit(token, handoffId, "Canonical active checkpoint.");
     await f.releasing.promise;
@@ -231,7 +271,7 @@ test("active compact accepts a helper-flattened abort after its structured check
   });
   try {
     const instruction = await boundary.promise;
-    const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+    const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
     const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
     store.submit(token, handoffId, "Canonical active checkpoint.");
     await f.releasing.promise;
@@ -273,7 +313,7 @@ test("active compact preserves delivery evidence after acceptance retires the br
   });
   try {
     const instruction = await boundary.promise;
-    const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+    const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
     const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
     store.submit(token, handoffId, "Canonical active checkpoint.");
     await f.releasing.promise;

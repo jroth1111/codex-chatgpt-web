@@ -22,7 +22,7 @@ export function readChatGptPromptText(
   element: HTMLElement | SVGElement,
   options?: { preserveLeading?: boolean },
 ): string {
-  const ignored = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]';
+  const ignored = 'svg, script, style, [data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]';
   const blocks: string[] = [];
   for (const child of Array.from(element.childNodes)) {
     if (child.nodeType !== 1) { blocks.push(child.textContent ?? ""); continue; }
@@ -46,6 +46,26 @@ export function readChatGptPromptText(
   }
   const text = blocks.join("\n");
   return options?.preserveLeading ? text : text.trimStart();
+}
+
+/** Ignore only the bound transport's leading mention, preserving every user-text character. */
+export function readChatGptUserMessageText(group: HTMLElement, connector?: { name: string; href: string }): string | undefined {
+  const bubbles = group.querySelectorAll<HTMLElement>("[data-user-message-bubble]");
+  const contents = bubbles.length === 1 ? bubbles[0]!.querySelectorAll<HTMLElement>("[data-search-result-target]") : [];
+  if (contents.length !== 1) return undefined;
+  const content = contents[0]!;
+  const text = content.innerText.replace(/\r\n?/g, "\n");
+  if (!connector) return text;
+  const mention = content.querySelector<HTMLElement>('[data-prompt-link-href^="app://"][data-prompt-link-label]');
+  if (!mention || mention.innerText !== connector.name || !text.startsWith(connector.name)
+    || mention.getAttribute("data-prompt-link-href") !== connector.href) return text;
+  const prefix = content.ownerDocument.createRange();
+  prefix.selectNodeContents(content);
+  prefix.setEndBefore(mention.closest("a") ?? mention);
+  if (prefix.toString() !== "") return text;
+  const suffix = text.slice(connector.name.length);
+  if (suffix.startsWith("\n ")) return suffix.slice(2);
+  return suffix.startsWith(" ") ? suffix.slice(1) : text;
 }
 
 /** Content-free diagnostic only. It never changes the readback or acceptance decision. */

@@ -13,6 +13,28 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+test.each([[false, false], [false, true], [true, false], [true, true]])("helper verification preserves saved-chat=%s without introducing a parallel Temporary preference=%s", async (useSavedChats, useTemporaryChats) => {
+  const root = mkdtempSync(join(tmpdir(), "codex-verification-chat-mode-"));
+  roots.push(root);
+  const helper = join(root, "helper.ts");
+  writeFileSync(helper, `
+    import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+    // Keep the launcher request, helper protocol and worker configuration real; replace browser IO.
+    ChatGptBrowserWorker.prototype.verifyConnector = async function() {
+      if (Object.hasOwn(this.config, "useTemporaryChats")) throw new Error("Parallel setting reached helper worker");
+      if (this.config.useSavedChats !== ${useSavedChats}) throw new Error("Saved Chat preference lost in verification IPC");
+      return this.config.appName;
+    };
+    await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
+  `, { mode: 0o700 });
+  const { verifyConnectorWithBrowserHelper } = require("../launcher/electron/browser-helper-verifier.cjs");
+  expect(await verifyConnectorWithBrowserHelper({
+    helper: { executable: process.execPath, script: helper },
+    descriptorPath: join(root, "launcher.json"),
+    appName: "Codex Native2", brokerSocketPath: join(root, "test-broker.sock"), useSavedChats, useTemporaryChats,
+  })).toEqual({ ok: true, appName: "Codex Native2" });
+});
+
 test("Bun daemon prepares only the resume prompt selected by the persistent Node helper", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
   roots.push(root);
@@ -32,6 +54,8 @@ test("Bun daemon prepares only the resume prompt selected by the persistent Node
         selected = undefined;
         send({ type: "event", id: message.id, event: "send_activated" });
         send({ type: "event", id: message.id, event: "submitted" });
+        send({ type: "event", id: message.id, event: "heartbeat" });
+        send({ type: "event", id: message.id, event: "generation_progress" });
         send({ type: "event", id: message.id, event: "reasoning", text: " files", continuation: true });
         send({ type: "event", id: message.id, event: "text", text: "done" });
         if (message.turn.captureLunaCheckpoint) send({
@@ -104,6 +128,8 @@ test("Bun daemon prepares only the resume prompt selected by the persistent Node
   const checkpoints: unknown[] = [];
   let sendActivated = false;
   let submitted = false;
+  let heartbeats = 0;
+  let generationProgress = 0;
   let released = false;
   let resumeReleased = false;
   let fullPrepareCount = 0;
@@ -130,6 +156,8 @@ test("Bun daemon prepares only the resume prompt selected by the persistent Node
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
+      onHeartbeat: () => { heartbeats += 1; },
+      onGenerationProgress: () => { generationProgress += 1; },
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
       onLunaCheckpoint: checkpoint => checkpoints.push(checkpoint),
@@ -144,6 +172,8 @@ test("Bun daemon prepares only the resume prompt selected by the persistent Node
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
+    expect(heartbeats).toBe(1);
+    expect(generationProgress).toBe(1);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {
@@ -289,7 +319,7 @@ test("accepted compaction retires through the helper as completed without hiding
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper, browserDiagnosticsPath: join(root, "diagnostics"),
     storageStatePath: join(root, "unused-state.json"), chromeExecutablePath: join(root, "unused-chrome"),
-    turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false, useSavedChats: false,
+    turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false, useSavedChats: true,
   });
   const logs: string[] = [];
   const logger = spyOn(console, "info").mockImplementation((...args) => { logs.push(args.join(" ")); });
@@ -331,7 +361,7 @@ test("accepted compaction retires through the helper as completed without hiding
   }
 });
 
-test("launcher helper protocol preserves multipart context and the compaction flag", async () => {
+test("launcher helper protocol preserves multipart context, broker identity and the compaction flag", async () => {
   const sent: Record<string, unknown>[] = [];
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2 DEV",
@@ -383,12 +413,14 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     compaction: true,
     prepare: async () => ({
       text: "commit",
+      turnToken: "turn_0123456789abcdef0123456789abcdef",
       images: [],
       skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,
         content: "<skill>\n<name>ipc</name>\n<path>/skills/ipc/SKILL.md</path>\ncheck IPC\n</skill>",
       })],
       multipart: { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "commit" },
       trimmedCompactionMessages: 4,
+      contextTokenBreakdown: { developer: { records: 1, chars: 400, tokens: 100 } },
       release() {},
     }),
     onTextDelta() {},
@@ -410,6 +442,8 @@ test("launcher helper protocol preserves multipart context and the compaction fl
       })],
       multipart: { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "commit" },
       trimmedCompactionMessages: 4,
+      turnToken: "turn_0123456789abcdef0123456789abcdef",
+      contextTokenBreakdown: { developer: { records: 1, chars: 400, tokens: 100 } },
     },
   });
 });
@@ -527,7 +561,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
 test("an older helper cannot silently drop selected skill files and releases the prepared turn", async () => {
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
-    storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false, useSavedChats: false,
+    storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false, useSavedChats: true,
   });
   const internal = client as unknown as {
     child: unknown;

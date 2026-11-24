@@ -1,5 +1,6 @@
 import { StallTimeoutError } from "../../stall-timeout";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import type { CodexParsedRequest, CodexToolResultMessage } from "../../types";
+import { ChatGptWebAdapterError, isChatGptTerminalCompletionFailure } from "./adapter-error";
 import type { ChatGptTurnSession } from "./turn-execution";
 
 function terminalError(error: unknown, phase: "send_activated" | "accepted"): ChatGptWebAdapterError {
@@ -19,15 +20,52 @@ function terminalError(error: unknown, phase: "send_activated" | "accepted"): Ch
 
 function submittedFailure(
   session: ChatGptTurnSession,
-  _aborted: boolean,
+  aborted: boolean,
   error: unknown,
+  parsed?: CodexParsedRequest,
 ): ChatGptWebAdapterError | undefined {
   const phase = session.runtime.submission?.phase;
+  if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_delivery_timeout"
+    && session.runtime.mode === "tools") {
+    if (!error.retryable) {
+      session.setTerminalError(error);
+      return error;
+    }
+    const results = parsed?.context.messages.filter((message): message is CodexToolResultMessage =>
+      message.role === "toolResult" && session.hasOutstanding(message.toolCallId)) ?? [];
+    const returnedIds = new Set(results.map(result => result.toolCallId));
+    const unresolved = session.outstanding().some(call => !returnedIds.has(call.callId))
+      || (session.runtime.externalProgress?.snapshot().activeToolCalls ?? 0) > returnedIds.size
+      || results.length !== returnedIds.size;
+    if (unresolved) {
+      const pending = new ChatGptWebAdapterError(
+        "ChatGPT reported that message delivery timed out while a tool result was still pending. "
+        + "Check the running command and its result before continuing.",
+        { status: error.status, errorType: error.errorType, code: error.code, retryable: false, cause: error },
+      );
+      session.setTerminalError(pending);
+      return pending;
+    }
+    // Canonical results prove completion without sending anything to the retired binding.
+    // Every other accepted or ambiguous failure keeps its existing terminal receipt.
+    if (phase === "accepted" && error.retryable && !aborted && parsed?._canonicalContextComplete === true
+      && session.canonicalCallDiagnostics().complete && session.unresolvedSupersededResultIds().length === 0
+      && (results.length > 0 || session.completedToolResultCount() > 0)
+      && session.hasCanonicalToolResultEvidence(parsed)
+      && !session.runtime.manualControl && !session.runtime.compactionRequested && !parsed._compactionRequest && !parsed._localCompactionRequest
+      && session.runtime.text.value().length === 0) return error;
+  }
   if (!phase || phase === "prepared") return undefined;
   const terminal = error instanceof ChatGptWebAdapterError && !error.retryable
     && (session.runtime.manualControl
       || error.retireSession
       || error.code === "chatgpt_submission_ambiguous"
+      || error.code === "chatgpt_response_incomplete"
+      || isChatGptTerminalCompletionFailure(error)
+      || error.code === "chatgpt_stopped_thinking"
+      || error.code === "context_length_exceeded"
+      || error.code === "compaction_handoff_timeout"
+      || error.code === "chatgpt_tool_approval_required"
       || error.code === "codex_tool_timeout"
       || error.code === "chatgpt_submitted_turn_failed")
     ? error
@@ -40,14 +78,23 @@ export function submittedBrowserFailure(
   session: ChatGptTurnSession,
   aborted: boolean,
   error: unknown,
+  parsed?: CodexParsedRequest,
 ): ChatGptWebAdapterError | undefined {
-  return submittedFailure(session, aborted, error);
+  return submittedFailure(session, aborted, error, parsed);
 }
 
 export function submittedStallFailure(
   session: ChatGptTurnSession,
   aborted: boolean,
   error: unknown,
+  parsed?: CodexParsedRequest,
 ): ChatGptWebAdapterError | undefined {
-  return error instanceof StallTimeoutError ? submittedFailure(session, aborted, error) : undefined;
+  if (error instanceof StallTimeoutError) {
+    const settled = session.settledOutcome();
+    if (settled?.type === "error" && settled.error instanceof ChatGptWebAdapterError
+      && settled.error.code === "chatgpt_delivery_timeout") error = settled.error;
+    return submittedFailure(session, aborted, error, parsed);
+  }
+  return error instanceof ChatGptWebAdapterError && error.code === "chatgpt_delivery_timeout"
+    ? submittedFailure(session, aborted, error, parsed) : undefined;
 }

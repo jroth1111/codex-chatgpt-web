@@ -17,6 +17,7 @@ const {
 const { runtimeInvocation } = require("./runtime-command.cjs");
 const { normalizeContextModes } = require("./context-mode.cjs");
 const { windowsTrustEnvironment } = require("./windows-trust.cjs");
+const { tunnelConnectionEnvironment } = require("./tunnel-proxy.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -287,6 +288,10 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     && typeof config.experimentalSkillAttachments !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalSkillAttachments");
   }
+  if (config.experimentalPlusNativeContext !== undefined
+    && typeof config.experimentalPlusNativeContext !== "boolean") {
+    throw new Error("Runtime configuration has an invalid experimentalPlusNativeContext");
+  }
   if (config.experimentalNoAutoCompact !== undefined
     && typeof config.experimentalNoAutoCompact !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalNoAutoCompact");
@@ -368,6 +373,7 @@ class RuntimeSupervisor {
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
     onConfigRead,
+    resolveProxy,
   }) {
     this.app = app;
     this.logger = logger;
@@ -383,6 +389,7 @@ class RuntimeSupervisor {
     this.publishOperation = publishOperation;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
     this.onConfigRead = onConfigRead;
+    this.resolveProxy = resolveProxy;
     this.configPath = path.join(coreHome, "config.json");
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
@@ -390,6 +397,8 @@ class RuntimeSupervisor {
     this.stopping = false;
     this.startPromise = null;
     this.stopPromise = null;
+    this.stateWriteFailure = null;
+    this.stateWriteCleanup = null;
     this.restartHistory = { daemon: [], tunnel: [] };
     this.restartTimers = { daemon: null, tunnel: null };
     this.tunnelMonitorTimer = null;
@@ -401,7 +410,6 @@ class RuntimeSupervisor {
     this.recoveryTasks = new Set();
     this.expectedExits = new WeakSet();
     this.restartableChildren = new WeakSet();
-    this.stateWriteCleanupStarted = false;
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
   }
@@ -485,30 +493,37 @@ class RuntimeSupervisor {
     } catch (error) {
       const message = `Could not persist launcher runtime ownership: ${errorMessage(error)}`;
       this.stopping = true;
+      this.stopTunnelMonitor();
       for (const name of ["daemon", "tunnel"]) {
         if (this.restartTimers[name]) {
           clearTimeout(this.restartTimers[name]);
           this.restartTimers[name] = null;
         }
       }
-      if (!this.stateWriteCleanupStarted) {
-        this.stateWriteCleanupStarted = true;
-        for (const name of ["daemon", "tunnel"]) {
-          const child = this[name];
-          if (!child || child.exitCode !== null || child.signalCode !== null) continue;
-          this.expectedExits.add(child);
-          try {
-            terminateOwnedProcessTree(child);
-          } catch (terminationError) {
-            this.logger.error("runtime.state_write_cleanup_failed", {
-              name,
-              message: errorMessage(terminationError),
-            });
-          }
-        }
-      }
       this.logger.error("runtime.state_write_failed", { status, message });
       this.publishOperation?.({ name: "runtime-supervisor", status: "failed", message });
+      if (!this.stateWriteFailure) {
+        this.stateWriteFailure = message;
+        // Wait for any lifecycle operation already in progress, then stop only
+        // the children we still own. Do not adopt processes from a stale file.
+        this.stateWriteCleanup = Promise.resolve().then(async () => {
+          if (this.startPromise) await this.startPromise.catch(() => {});
+          if (this.stopPromise) await this.stopPromise.catch(() => {});
+          await Promise.allSettled([...this.recoveryTasks]);
+          if (!this.daemon && !this.tunnel) return;
+          const config = this.readConfig();
+          if (!config) throw new Error("owned runtime cannot be stopped without its configuration");
+          await this.cleanupFailedStart(config);
+        }).catch((cleanupError) => {
+          this.stateWriteFailure = appendFailure(message, "owned runtime cleanup failed", cleanupError);
+          this.logger.error("runtime.state_write_cleanup_failed", { message: this.stateWriteFailure });
+          this.publishOperation?.({ name: "runtime-supervisor", status: "failed", message: this.stateWriteFailure });
+        }).finally(() => {
+          this.stopTunnelMonitor();
+          this.stopping = true;
+          this.stateWriteCleanup = null;
+        });
+      }
       return false;
     }
   }
@@ -542,9 +557,9 @@ class RuntimeSupervisor {
     if (!preservesLiveOwnership) this.writeState("external", detail);
   }
 
-  childEnvironment(name, config) {
+  childEnvironment(name, config, environment = process.env) {
     const env = {
-      ...process.env,
+      ...environment,
       CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
     };
     delete env.CODEX_CHATGPT_WEB_API_KEY;
@@ -1103,20 +1118,24 @@ class RuntimeSupervisor {
   }
 
   async runTunnelConnectCommand(config) {
+    const connection = await tunnelConnectionEnvironment({ resolveProxy: this.resolveProxy });
     const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
     const invocation = this.runtimeCommand([
       "mcp", "--contract", contract, "--broker-socket", config.brokerSocketPath,
     ]);
     return await this.runTunnelCommand(
       config,
-      managedTunnelConnectArgs(config, invocation),
+      [...managedTunnelConnectArgs(config, invocation), "--control-plane-base-url", connection.baseURL],
       TUNNEL_START_TIMEOUT_MS,
       "Tunnel managed startup",
+      // Finish initialization before another chat can call the shared MCP server.
+      { ...connection.env, MCP_STDIO_SEND_INITIALIZED_NOTIFICATION: "true" },
     );
   }
 
   startTunnelMonitor(config) {
     this.stopTunnelMonitor();
+    if (this.stateWriteFailure) return;
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
     const generation = this.tunnelMonitorGeneration;
@@ -1130,9 +1149,13 @@ class RuntimeSupervisor {
       });
       if (this.tunnelMonitorFailures < TUNNEL_MONITOR_FAILURE_THRESHOLD) return;
       this.lastChildFailure.tunnel = message;
+      const failedTunnel = this.tunnel;
       this.tunnel = null;
       this.stopTunnelMonitor();
-      if (!this.tryWriteState("degraded", message)) return;
+      if (!this.tryWriteState("degraded", message)) {
+        this.tunnel = failedTunnel;
+        return;
+      }
       this.publishOperation?.({ name: "runtime-recovery", status: "running", message });
       this.scheduleRecovery("tunnel");
     };
@@ -1191,6 +1214,7 @@ class RuntimeSupervisor {
   }
 
   async startDaemon(config) {
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (this.daemon) {
       const child = this.daemon;
       const identity = Number.isInteger(child.pid)
@@ -1228,7 +1252,14 @@ class RuntimeSupervisor {
 
   async startIfConfigured() {
     if (this.stopPromise) await this.stopPromise;
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
     if (this.startPromise) return this.startPromise;
+    if (this.stateWriteFailure) {
+      if (this.daemon || this.tunnel) throw new Error(this.stateWriteFailure);
+      // An explicit start can recover only after both cleanup and a fresh write succeed.
+      this.writeState("stopped");
+      this.stateWriteFailure = null;
+    }
     this.startPromise = this.startConfigured();
     try {
       return await this.startPromise;
@@ -1325,7 +1356,9 @@ class RuntimeSupervisor {
     });
     try {
       await this.startTunnel(config, "runtime-start");
+      if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
       if (!tunnelOnly) await this.startDaemon(config);
+      if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
       this.writeState("ready");
@@ -1343,7 +1376,7 @@ class RuntimeSupervisor {
       } catch (caught) {
         cleanupError = caught;
       } finally {
-        this.stopping = false;
+        this.stopping = Boolean(this.stateWriteFailure);
       }
       const primary = errorMessage(error);
       const message = cleanupError
@@ -1414,21 +1447,9 @@ class RuntimeSupervisor {
     if (config.mode === "full") {
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
     }
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (!this.tryWriteState("ready")) {
-      let cleanupError;
-      try {
-        await this.cleanupFailedStart(config);
-      } catch (caught) {
-        cleanupError = caught;
-      }
-      const message = cleanupError
-        ? appendFailure(
-            "Recovered runtime could not persist launcher ownership",
-            "runtime recovery cleanup failed",
-            cleanupError,
-          )
-        : "Recovered runtime could not persist launcher ownership";
-      throw new Error(message);
+      throw new Error("Recovered runtime could not persist launcher ownership");
     }
     this.publishOperation?.({ name: "runtime-recovery", status: "completed", message: `${name} recovered` });
   }
@@ -1453,6 +1474,9 @@ class RuntimeSupervisor {
           throw error;
         }
       } else {
+        if (this.stateWriteFailure) {
+          throw new Error("owned daemon did not provide matching health evidence; refusing an unsafe stop");
+        }
         await this.stopChild("daemon");
       }
     }
@@ -1662,14 +1686,14 @@ class RuntimeSupervisor {
     );
   }
 
-  async runTunnelCommand(config, args, timeoutMs, label) {
+  async runTunnelCommand(config, args, timeoutMs, label, env = process.env) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
     return await new Promise((resolve, reject) => {
       const child = spawn(tunnel.binaryPath, args, {
         cwd: tunnel.profileDir,
         detached: DETACH_OWNED_CHILD,
-        env: { ...this.childEnvironment("tunnel", config), MCP_CONNECTION_MAX_TTL: TUNNEL_MCP_CONNECTION_MAX_TTL },
+        env: this.childEnvironment("tunnel", config, { ...process.env, ...env, MCP_CONNECTION_MAX_TTL: TUNNEL_MCP_CONNECTION_MAX_TTL }),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
@@ -2015,6 +2039,8 @@ class RuntimeSupervisor {
 
   async stopForSetup(options) {
     if (this.stopPromise) return this.stopPromise;
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
+    if (this.stopPromise) return this.stopPromise;
     this.stopPromise = this.performStopForSetup(options);
     try {
       return await this.stopPromise;
@@ -2033,6 +2059,7 @@ class RuntimeSupervisor {
   }
 
   async forceStopOwnedRuntime(reason) {
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
     this.logger.warn("runtime.forced_shutdown_started", { message: errorMessage(reason) });
     this.stopping = true;
     this.stopTunnelMonitor();
@@ -2074,7 +2101,7 @@ class RuntimeSupervisor {
         failures,
       };
     } finally {
-      this.stopping = false;
+      this.stopping = Boolean(this.stateWriteFailure);
     }
   }
 

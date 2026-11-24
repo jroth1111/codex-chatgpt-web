@@ -16,7 +16,21 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
-> **릴리스: `6.1.4-Enhanced.1`.** 다운로드 버튼은 항상 최신 공개 Enhanced 릴리스를 엽니다. [소개 영상 보기 (영어 MP4)](https://github.com/Evanlau1798/codex-chatgpt-web/releases/download/v6.1.4-Enhanced.1/Codex-Web-GPT-6.1.4-Enhanced.1-en.mp4).
+> **버전: `6.1.17-Enhanced.1`.** 다운로드 버튼은 항상 최신 공개 Enhanced 릴리스를 엽니다.
+
+다음 메시지 제안은 기본적으로 꺼져 있으며 Enhanced 설정에 있습니다. 자동 Native 출력의 최종 답변과 동시에 생성하고 로컬 5분 TTL 캐시를 재사용합니다. 캐시가 없으면 제안하지 않으며 추가 Web 요청이나 페이지를 만들지 않습니다.
+
+upstream v6.1.17을 통합하면서 Enhanced 세션, Native2 도구 및 Fast startup을 유지합니다.
+
+보존 세션과 compact 교체 페이지도 Temporary Chat을 기본으로 사용하며 기존 Saved Chats 설정을 유지합니다. 네이티브 connector를 먼저 시도하고, 필요한 경우 프로그램이 소유한 임시 작업 페이지에서만 제한된 메모리 호환 복구를 수행합니다. 계정이나 서비스 제한으로 도구 또는 최종 답변 전달이 실패할 수 있으며 복구 성공을 보장하지 않습니다.
+
+**Plus native context (실험적)** 는 Settings의 기본 비활성 옵션이며, 검증된 Plus 계정과 Enhanced 자동 모드에서만 적용됩니다.
+GPT-6／GPT-5.6 Sol 추론 경로는 256,000-token 창과 230,400 tokens 자동 compaction을 선언합니다.
+허용되지 않은 effort나 개별 메시지 및 composer 한도는 늘리지 않습니다. 실제 256K 유지 능력은 아직 검증되지 않았습니다.
+다른 계정, Instant, Original, Zero Risk의 예산과 No Context Window의 독립 checkpoint 정책은 유지됩니다.
+CLI 설정은 `--plus-native-context`／`--standard-plus-context` 를 지원합니다.
+
+이름이 변경된 ChatGPT GPT-6 선택 메뉴와 다섯 가지 추론 단계를 지원합니다. Codex에는 GPT-6와 GPT-6 Instant가 표시되며, 기존 `chatgpt-web/latest`와 `chatgpt-web/latest-instant` 작업 ID는 계속 호환됩니다.
 
 <p align="center">
   <img src="assets/demo.gif" width="960" alt="네이티브 Codex 하네스를 사용하는 ChatGPT Web 실시간 턴">
@@ -26,7 +40,7 @@
   <a href="#get-started">시작하기</a> · <a href="https://github.com/Evanlau1798/codex-chatgpt-web/releases">업데이트</a> · <a href="docs/architecture.md">아키텍처</a> · <a href="TROUBLESHOOTING.md">문제 해결</a>
 </p>
 
-Codex의 네이티브 모델 선택기에서 Pro를 포함해 계정에 제공되는 ChatGPT Web 모델을 사용하세요. ChatGPT Web의 별도 사용 한도를 사용하므로 Work나 Codex의 사용량은 차감되지 않습니다. 기존 인터페이스, 작업, 이미지, 스트리밍은 그대로 유지됩니다.
+Codex의 네이티브 모델 선택기에서 Pro를 포함해 계정에 제공되는 ChatGPT Web 모델을 사용하세요. 메시지는 로그인된 ChatGPT Web 세션을 통해 전송되며 해당 계정에 적용되는 사용 한도를 따릅니다. 기존 인터페이스, 작업, 이미지, 스트리밍은 그대로 유지됩니다.
 
 Full harness 모드는 MCP를 통해 ChatGPT를 현재 작업의 파일, 터미널, 도구 및 승인 절차에 연결합니다. 대화는 Codex 작업에 계속 연결되어 있으므로 컨텍스트가 늘어나도 작업을 이어갈 수 있습니다.
 
@@ -132,9 +146,13 @@ inbound 포트를 열거나 라우터 포트 포워딩을 설정할 필요가 �
 >
 > GPT-5.6 Sol Pro 및 GPT-6 Astra의 현재 ChatGPT 메시지 허용량은
 > [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309)를 참고하세요.
-> 컨텍스트 한도는 계정 유형과 선택한 effort에 따라 달라집니다. Plus의 Medium/High는 실측
+> 컨텍스트 한도는 계정 유형과 선택한 effort에 따라 달라집니다. GPT-5.6 Plus의 Medium/High는 실측
 > 90,000-token 창을 사용하며, 실험적 3× context를 활성화하면 최대 270,000 tokens까지 확장됩니다.
 > 모든 경우에 네이티브 Codex compaction이 지원됩니다.
+> GPT-6 Sol Bigger Context는 Plus에서 120,000 tokens／110,000 tokens compaction, Pro에서 240,000／220,000입니다.
+> 계정에서 사용할 수 있는 추론 effort만 지원합니다. Instant는 표준 창을 사용합니다.
+> GPT-5.6 및 GPT-6 Pro의 기존 한도는 유지됩니다. Bigger Context는 Original Automatic 전용이며
+> Enhanced와 동시에 사용할 수 없습니다. 실험적 Luna/Think는 작업 대화를 유지하고 rolling checkpoint를 끕니다.
 
 1. 필수 설정을 완료하고 **MCP**를 연 다음 Tunnel과 일반 API 키를 생성하고
    **하네스 연결**을 누릅니다.
@@ -192,7 +210,7 @@ Full 모드를 활성화하기 전에 전체 [아키텍처](docs/architecture.md
 [보안 모델](docs/security-model.md)을 읽어보세요. 취약점은 [SECURITY.md](SECURITY.md)를 통해
 보고해 주세요.
 
-Temporary Chat은 [ChatGPT의 개인정보 보호 모드](https://help.openai.com/en/articles/8914046-temporary-chat-faq)이며, 프롬프트는 여전히 OpenAI에서 처리됩니다.
+작업에는 기본적으로 임시 채팅을 사용하며 ChatGPT 기록에 남지 않습니다. 대화를 저장하려면 **Save chats in ChatGPT**를 켜세요. 커넥터를 사용할 수 없으면 오류를 표시하며 일반 채팅으로 자동 전환하지 않습니다. 프롬프트는 계속 OpenAI에서 처리됩니다.
 
 검증 범위: [release validation](docs/release-validation.md).
 

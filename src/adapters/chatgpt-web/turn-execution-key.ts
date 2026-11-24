@@ -27,6 +27,10 @@ function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
   return input;
 }
 
+export function chatGptTurnPurpose(parsed: CodexParsedRequest): "compaction" | "local_compaction" | "response" {
+  return parsed._compactionRequest ? "compaction" : parsed._localCompactionRequest ? "local_compaction" : "response";
+}
+
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
@@ -34,8 +38,8 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,
-    purpose: parsed._compactionRequest ? "compaction" : "response",
-    ...(parsed._compactionRequest ? { revision: compactionInputRevision(parsed) } : {}),
+    purpose: chatGptTurnPurpose(parsed),
+    ...(parsed._compactionRequest || parsed._localCompactionRequest ? { revision: compactionInputRevision(parsed) } : {}),
   });
 }
 
@@ -52,5 +56,21 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
     threadId: identity.threadId,
     turnId: source.turnId ?? identity.turnId,
     purpose: "response",
+  });
+}
+
+export function chatGptTurnRoundKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for round replay");
+  const body = parsed._rawBody;
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || !Array.isArray((body as { input?: unknown }).input)) {
+    throw new Error("ChatGPT web requires the complete native Codex input for round replay");
+  }
+  return executionKey(parsed, {
+    threadId: identity.threadId,
+    turnId: identity.turnId,
+    purpose: chatGptTurnPurpose(parsed),
+    input: (body as { input: unknown[] }).input,
   });
 }

@@ -53,11 +53,16 @@ Setup options:
   --enhanced-session           Enable Enhanced Web session mode
   --standard-session           Disable Enhanced Web session mode
   --bigger-context             Enable adaptive 1/2/6-message context (Enhanced mode must be off)
+  --plus-native-context        Opt in to experimental Enhanced Plus 256K context
+  --standard-plus-context      Disable the Plus native context experiment (default)
   --standard-context           Disable experimental multi-message context
   --fresh-conversation         Fresh chat per turn (automatic Original mode only)
   --retained-conversation      Disable fresh chat per turn (default)
   --saved-chats                Save Codex/Claude task chats to ChatGPT history (API stays Temporary)
+  --ordinary-chats             Alias of --saved-chats
   --temporary-chats            Use Temporary Chat for task conversations (default)
+  --composer-predictions       Opt into same-final suggestions with a local TTL cache (Enhanced)
+  --no-composer-predictions    Disable next-message suggestions (default)
   --skill-attachments          Experimental selected skills as text attachments
   --inline-skills              Keep selected skills inline (default)
   --no-auto-compact            Disable Codex auto compact for routed Web models (experimental)

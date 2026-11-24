@@ -19,7 +19,20 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
-> **发布版本：`6.1.4-Enhanced.1`。** 下载按钮会始终打开最新发布的 Enhanced 版本。[观看介绍影片（英文 MP4）](https://github.com/Evanlau1798/codex-chatgpt-web/releases/download/v6.1.4-Enhanced.1/Codex-Web-GPT-6.1.4-Enhanced.1-en.mp4)。
+> **版本：`6.1.17-Enhanced.1`。** 下载按钮会始终打开最新发布的 Enhanced 版本。
+
+下一条消息建议默认关闭，位于 Enhanced 设置；自动 Native 输出在同一次最终提交中生成建议，复用本地 5 分钟 TTL 缓存。缓存未命中就不提供建议，不新增 Web 请求或页面。
+
+已整合上游 v6.1.17，保留 Enhanced 会话、Native2 工具与快速启动。
+
+Temporary Chat 仍为默认模式，包含保留会话及 compact 替换页；已有 Saved Chats 偏好保持不变。先尝试原生 connector，仅在程序持有的临时工作页执行受限的内存兼容恢复。ChatGPT 账号或服务限制仍可能阻止工具访问或最终回答交付，兼容恢复不保证成功。
+
+**Plus 原生上下文（实验性）** 是 Settings 中默认关闭的选项，仅对经验证的 Plus 账户与 Enhanced 自动模式生效。
+GPT-6／GPT-5.6 Sol 推理路线向 Codex 宣告 256,000-token 窗口，于 230,400 tokens 自动压缩；不解锁账户没有的 effort，
+也不提高单条消息或 composer 上限。256K 实际保留能力尚未确认。其他账户、Instant、Original 与 Zero Risk 保持既有预算，
+No Context Window 仍使用独立的 checkpoint 策略。CLI 设置支持 `--plus-native-context`／`--standard-plus-context`。
+
+支持 ChatGPT 更名后的 GPT-6 模型选择器及五种推理档位。Codex 显示 GPT-6 和 GPT-6 Instant；已有 `chatgpt-web/latest` 与 `chatgpt-web/latest-instant` 任务 ID 保持兼容。
 
 <p align="center">
   <a href="TROUBLESHOOTING.md">故障排除</a> · <a href="SECURITY.md">安全</a> · <a href="CONTRIBUTING.md">贡献</a>
@@ -207,7 +220,7 @@ reasoning 摘要与最终答案会通过现有 Native2 tunnel 返回，ChatGPT �
 ### 三个上下文开关分别改变什么
 
 **增强型 Web 会话模式**会在工具回合、steering 与压缩之间保留同一个任务绑定的 ChatGPT 对话。
-它只改变会话连续性，不会扩大上下文窗口，也不会关闭压缩；它与 **Bigger Context** 互斥。
+它本身只改变会话连续性，不会扩大上下文窗口，也不会关闭压缩；Plus 原生上下文实验选项另见上文。它与 **Bigger Context** 互斥。
 Bigger Context 使用总共 1、2 或 6 条浏览器消息；六段为五条暂存消息加一条最终执行消息。每条都
 是真实的 ChatGPT 请求，可能消耗账户额度。它会把向 Codex 公布的上下文和压缩阈值扩大三倍，但
 ChatGPT 的消息、模型、编辑器、传输与服务限制仍然有效。
@@ -239,8 +252,12 @@ recap、resume 与 subagent 生命周期仍由客户端管理；Enhanced 模式�
 >
 > 有关 **GPT-5.6 Sol Pro** 和 **GPT-6 Astra** 当前的 ChatGPT 消息额度，请参阅
 > [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309)。Token 上下文上限取决于
-> 账户类型和所选 effort。Plus 的 Medium/High 使用实测的 90,000-token 窗口；启用实验性的
+> 账户类型和所选 effort。GPT-5.6 Plus 的 Medium/High 使用实测的 90,000-token 窗口；启用实验性的
 > **3× context** 后最高为 270,000 tokens，并且全程支持原生 Codex compaction。
+> GPT-6 Sol 的 Bigger Context 在 Plus 下为 120,000 tokens／110,000 tokens 压缩，在 Pro 下为 240,000／220,000。
+> 仅开放账户可用的推理 effort；Instant 使用标准窗口。GPT-5.6 与 GPT-6 Pro 保留既有上限。
+> Bigger Context 仅供 Original Automatic 使用，与 Enhanced 互斥。Luna/Think 为实验性选项，
+> 启用时保留任务对话，并停用 rolling checkpoint。
 
 1. 完成启动器中的必需设置。
 2. 在启动器中打开 **MCP**。请在将使用 ChatGPT 连接器的同一个 OpenAI 账户中创建 Tunnel

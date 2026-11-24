@@ -49,13 +49,13 @@ Interactive commands:
   /fill TOKENS         Append deterministic inert context without opening ChatGPT
   /send-fill TOKENS    Send deterministic inert text through the live browser now
   /compact             Run the real browser compaction path now
-  /model MODEL         Select gpt-5.6-luna, gpt-5.6-sol-instant, gpt-5.6-sol, gpt-5.6-pro, gpt-6-pro, or zero-risk
+  /model MODEL         Select gpt-6-sol-instant, gpt-6-sol, gpt-6-pro, gpt-5.6-luna, gpt-5.6-sol-instant, gpt-5.6-sol, gpt-5.6-pro, or zero-risk
   /reset yes           Clear this named DEV chat and create a new thread identity
   /help                Show this command list
   /exit                Exit
 
 Experimental settings:
-  Bigger Context       Enable in Settings; adapts context across 1, 2, or 3 messages
+  Bigger Context       Enable in Settings; adapts context across 1, 2, or 6 messages
 `;
 
 function takeFlag(args: string[], name: string): boolean {
@@ -155,7 +155,7 @@ function printHeader(
   stdout.write(`model ${state.model} · ${mode === "full" ? "tools explicitly simulated" : "browser-only, no outer tools"} · live launcher browser\n`);
   stdout.write(`context ${statusLine(status)}\n`);
   if (biggerContext) {
-    stdout.write(`${yellow("Bigger Context experimental")} · adaptive 1/2/3-message context · compaction uses 3 stages · elevated rate-limit/cooldown risk\n`);
+    stdout.write(`${yellow("Bigger Context experimental")} · adaptive 1/2/6-message context · compaction uses 6 parts · elevated rate-limit/cooldown risk\n`);
   }
   stdout.write(`${dim("Codex route is untouched. No Responses port is bound, replaced, stopped, or restarted.")}\n`);
 }
@@ -328,7 +328,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
       stdout.write(`launcher: ${launcher.running ? `running (pid ${launcher.pid})` : `not ready${launcher.error ? ` · ${launcher.error}` : ""}`}\n`);
       stdout.write(`config: ${config.configured ? `${config.mode} (${config.purpose})` : `not ready${config.error ? ` · ${config.error}` : ""}`}\n`);
       stdout.write(`MCP runtime: ${mcpRuntime.required ? (mcpRuntime.ready ? "ready" : `not ready${mcpRuntime.detail ? ` · ${mcpRuntime.detail}` : ""}`) : "not required"}\n`);
-      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, adaptive 1/2/3 messages; compaction uses 3 stages)" : "disabled"}\n`);
+      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, adaptive 1/2/6 messages; compaction uses 6 parts)" : "disabled"}\n`);
       stdout.write("Codex route: isolated and unused\nResponses listener: not started\n");
     }
     return;
@@ -358,12 +358,16 @@ export async function runDevCommand(args: string[]): Promise<void> {
     }
     const biggerContext = takeFlag(args, "--bigger-context");
     const standardContext = takeFlag(args, "--standard-context");
+    const predictions = takeFlag(args, "--composer-predictions");
+    const noPredictions = takeFlag(args, "--no-composer-predictions");
+    if (predictions && noPredictions) throw new Error("Choose --composer-predictions or --no-composer-predictions");
     const skillAttachments = takeFlag(args, "--skill-attachments");
     const inlineSkills = takeFlag(args, "--inline-skills");
     if (skillAttachments && inlineSkills) throw new Error("Choose --skill-attachments or --inline-skills");
-    const savedChats = takeFlag(args, "--saved-chats");
     const temporaryChats = takeFlag(args, "--temporary-chats");
-    if (savedChats && temporaryChats) throw new Error("Choose --saved-chats or --temporary-chats");
+    const ordinaryChats = takeFlag(args, "--ordinary-chats");
+    const savedChats = takeFlag(args, "--saved-chats");
+    if (temporaryChats && (ordinaryChats || savedChats)) throw new Error("Choose --temporary-chats or --saved-chats/--ordinary-chats");
     const freshConversation = takeFlag(args, "--fresh-conversation");
     const retainedConversation = takeFlag(args, "--retained-conversation");
     if (freshConversation && retainedConversation) {
@@ -371,6 +375,11 @@ export async function runDevCommand(args: string[]): Promise<void> {
     }
     if (biggerContext && standardContext) {
       throw new Error("Choose at most one context mode: --bigger-context or --standard-context");
+    }
+    const plusNativeContext = takeFlag(args, "--plus-native-context");
+    const standardPlusContext = takeFlag(args, "--standard-plus-context");
+    if (plusNativeContext && standardPlusContext) {
+      throw new Error("Choose at most one Plus context mode: --plus-native-context or --standard-plus-context");
     }
     const noAutoCompact = takeFlag(args, "--no-auto-compact");
     const autoCompact = takeFlag(args, "--auto-compact");
@@ -396,11 +405,13 @@ export async function runDevCommand(args: string[]): Promise<void> {
         ? { browserInteractionMode: manualBrowserInteraction ? "manual" as const : "automatic" as const }
         : {}),
       ...(enhancedSession || standardSession ? { useEnhancedWebSessionMode: enhancedSession } : {}),
+      ...(temporaryChats || ordinaryChats || savedChats ? { useSavedChats: ordinaryChats || savedChats } : {}),
       ...(biggerContext || standardContext ? { experimentalBiggerContext: biggerContext } : {}),
+      ...(predictions || noPredictions ? { composerPredictionsEnabled: predictions } : {}),
       ...(skillAttachments || inlineSkills ? { experimentalSkillAttachments: skillAttachments } : {}),
+      ...(plusNativeContext || standardPlusContext ? { experimentalPlusNativeContext: plusNativeContext } : {}),
       ...(noAutoCompact || autoCompact ? { experimentalNoAutoCompact: noAutoCompact } : {}),
       ...(freshConversation || retainedConversation ? { experimentalFreshConversationPerTurn: freshConversation } : {}),
-      ...(savedChats || temporaryChats ? { useSavedChats: savedChats } : {}),
       ...(tunnelId ? { tunnelId } : {}),
       ...(runtimeKeyFile ? { runtimeKeyFile } : {}),
     });

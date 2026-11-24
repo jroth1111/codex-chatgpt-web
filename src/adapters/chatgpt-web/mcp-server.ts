@@ -1,4 +1,5 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { randomBytes } from "node:crypto";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -37,6 +38,7 @@ import { callTurnBroker } from "./turn-broker";
 import { invokeChatGptMcpTool } from "./mcp-invocation";
 import { readNativeAgentWait, startNativeAgentWait } from "./mcp-agent-wait";
 import { brokerMcpResult as asMcpResult, mcpJsonResult as result } from "./mcp-results";
+import { decodeGatewayResult, gatewayResultMarker } from "./gateway-result";
 import { withClaimedTurn, type ClaimedTurn } from "./mcp-turn-activity";
 import { observeMcpToolCalls } from "./mcp-observation";
 import { isConnectorContractProbeQuery, recordConnectorContractProbeQuery } from "./connector-contract";
@@ -64,6 +66,8 @@ import {
   browserToolParameters,
   CHATGPT_WEB_AGENT_WAIT_POLL_MS,
   exactTool,
+  assertCommandPollArguments,
+  COMMAND_POLL_TRANSPORT_RULE,
   execGateway,
   matchingToolInventory,
 } from "./mcp-tool-inventory";
@@ -127,7 +131,7 @@ export function createChatGptMcpServer(options: {
     bindingId: string,
     bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
-    payload: { arguments?: Record<string, unknown>; input?: string },
+    payload: { arguments?: Record<string, unknown>; input?: string; resultMarker?: string },
     signal?: AbortSignal,
   ) => {
     const name = wireName(tool);
@@ -144,8 +148,9 @@ export function createChatGptMcpServer(options: {
         freeform: tool.freeform === true,
         ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
       }, signal);
-      logMcpToolPhase(name, "invoke", "completed", ` isError=${response.isError === true} binding=${binding}`);
-      return asMcpResult(response);
+      const decoded = payload.resultMarker ? decodeGatewayResult(response, payload.resultMarker) : response;
+      logMcpToolPhase(name, "invoke", "completed", ` isError=${decoded.isError === true} binding=${binding}`);
+      return asMcpResult(decoded);
     } catch (error) {
       logMcpToolPhase(name, "invoke", "failed", ` errorType=${diagnosticErrorType(error)} errorCode=${diagnosticErrorCode(error)} binding=${binding}`);
       throw error;
@@ -164,8 +169,9 @@ export function createChatGptMcpServer(options: {
     if (!gateway) {
       throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
     }
+    const resultMarker = gatewayResultMarker();
     return invoke(bindingId, bound, gateway, {
-      input: execGatewayProgram(nestedToolName, freeform, payload, bound.tools.map(wireName)),
+      input: execGatewayProgram(nestedToolName, freeform, payload, bound.tools.map(wireName), resultMarker), resultMarker,
     }, signal);
   };
 
@@ -210,8 +216,9 @@ export function createChatGptMcpServer(options: {
     }
     const gateway = execGateway(bound);
     if (!gateway) throw new Error("This Codex turn did not advertise a native command tool or the native exec gateway");
+    const resultMarker = gatewayResultMarker();
     return invoke(claimed.bindingId, bound, gateway, {
-      input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments),
+      input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments, resultMarker), resultMarker,
     }, signal);
   };
 
@@ -275,6 +282,7 @@ export function createChatGptMcpServer(options: {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (input, extra) => {
+      assertCommandPollArguments(input);
       const { session_id, chars, yield_time_ms, max_output_tokens } = input;
       return withTurn("codex_write_stdin", turnReference(contract, input), extra, claimed => {
         const bound = claimed.environment;
@@ -380,7 +388,7 @@ export function createChatGptMcpServer(options: {
           if (!(error instanceof Error) || error.message !== "output control is unavailable for this turn") throw error;
         }
       }
-      if (query && isConnectorContractProbeQuery(query, contract)) {
+      if (query && isConnectorContractProbeQuery(query, contract, requestId)) {
         return withTurn("codex_tool_inventory", requestId, extra, () => {
           if (!recordConnectorContractProbeQuery(query, contract)) {
             throw new Error("Connector contract probe changed during validation");
@@ -461,12 +469,13 @@ export function createChatGptMcpServer(options: {
           ...(discoveryTools.length > 0 ? { discovery_tools: discoveryTools } : {}),
         });
         const excludedNames = bound.tools.map(wireName);
+        const marker = `codex-tool-catalog:${randomBytes(16).toString("hex")}:`;
         const nestedOffset = Math.max(0, offset - matches.length);
         const nestedLimit = Math.max(0, limit - directPage.length);
         return invoke(claimed.bindingId, bound, gateway, {
-          input: gatewayToolCatalogProgram({ query, offset: nestedOffset, limit: nestedLimit, excludedNames }),
+          input: gatewayToolCatalogProgram({ query, offset: nestedOffset, limit: nestedLimit, excludedNames, marker }),
         }, extra.signal).then(response => {
-          const catalog = gatewayToolCatalogPage(response, new Set(excludedNames));
+          const catalog = gatewayToolCatalogPage(response, new Set(excludedNames), marker);
           const nestedPage = catalog.tools.map(tool => ({
             wire_name: tool.name, name: tool.name, namespace: null,
             description: gatewayToolDescription(tool, contract === "native"), kind: "gateway",
@@ -525,6 +534,9 @@ export function createChatGptMcpServer(options: {
           if (input !== undefined && args && Object.keys(args).length > 0) {
             throw new Error(`Codex nested tool ${wire_name} accepts either arguments or freeform input, not both`);
           }
+          if (wire_name === "write_stdin" && input !== undefined) {
+            throw new Error("ChatGPT Web write_stdin requires structured arguments. " + COMMAND_POLL_TRANSPORT_RULE);
+          }
           if (isGatewayAgentWaitTool(wire_name) && input !== undefined) {
             throw new Error("ChatGPT Web wait_agent requires structured arguments and a logical timeout_ms from 30000 to 3600000 in 30000 ms steps");
           }
@@ -538,10 +550,8 @@ export function createChatGptMcpServer(options: {
           }
           assertGatewayToolArguments(wire_name, invocationArguments);
           const toolArguments = boundedConnectorToolArguments(wire_name, invocationArguments);
-          return invoke(claimed.bindingId, bound, gateway, {
-            input: execGatewayProgram(wire_name, input !== undefined, {
-              ...(input !== undefined ? { input } : { arguments: toolArguments }),
-            }, bound.tools.map(wireName)),
+          return invokeNestedNative(claimed.bindingId, bound, wire_name, input !== undefined, {
+            ...(input !== undefined ? { input } : { arguments: toolArguments }),
           }, extra.signal);
         }
         if (tool.freeform) {

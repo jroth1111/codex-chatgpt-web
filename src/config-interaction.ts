@@ -1,3 +1,4 @@
+import type { ChatGptWebModelCapabilities } from "./chatgpt-web-models";
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
 export type BrowserInteractionMode = "automatic" | "manual";
@@ -112,7 +113,10 @@ export interface AppConfig {
   /** Observed Extra High slider capability. Missing legacy values fail closed. */
   extraHighAvailable?: boolean;
   proAvailable: boolean;
+  modelCapabilities?: ChatGptWebModelCapabilities;
   experimentalBiggerContext: boolean;
+  composerPredictionsEnabled: boolean;
+  experimentalPlusNativeContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalParallelSubagents?: boolean;
   /** Rebuild Original-mode turns; Enhanced always disables this preference. */

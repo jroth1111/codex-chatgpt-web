@@ -228,6 +228,12 @@ export function SettingsSurface({
       setBusy(false);
     }
   };
+  const setComposerPredictions = async (enabled: boolean) => {
+    setBusy(true); setError(null);
+    try { updateState(await api!.setComposerPredictions(enabled)); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(false); }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -265,6 +271,17 @@ export function SettingsSurface({
     setError(null);
     try {
       updateState(await api!.setExperimentalNoAutoCompact(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setExperimentalPlusNativeContext = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setExperimentalPlusNativeContext(enabled));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -313,6 +330,7 @@ export function SettingsSurface({
   };
   const biggerContextState = biggerContextSwitchState({
     browserInteractionMode: snapshot.state.browserInteractionMode,
+    biggerContextAvailable: snapshot.state.biggerContextAvailable,
     busy,
     coreSetupComplete: snapshot.state.coreSetupComplete === true,
     useEnhancedWebSessionMode: snapshot.state.useEnhancedWebSessionMode,
@@ -434,6 +452,19 @@ export function SettingsSurface({
             checked={snapshot.state.experimentalNoAutoCompact}
             disabled={busy || snapshot.state.coreSetupComplete !== true}
             onChange={(enabled) => void setExperimentalNoAutoCompact(enabled)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
+          <Switch checked={snapshot.state.composerPredictionsEnabled}
+            disabled={busy || activeWebTurn || !snapshot.state.coreSetupComplete || !snapshot.state.useEnhancedWebSessionMode
+              || !snapshot.state.useEnhancedOutputTunnel || snapshot.state.browserInteractionMode !== "automatic"}
+            onChange={(enabled) => void setComposerPredictions(enabled)} />
+        </SettingRow>
+        <SettingRow body={copy.plusNativeContextBody} label={copy.plusNativeContext}>
+          <Switch
+            checked={snapshot.state.plusNativeContextAvailable === true && snapshot.state.experimentalPlusNativeContext}
+            disabled={busy || snapshot.state.coreSetupComplete !== true || snapshot.state.plusNativeContextAvailable !== true}
+            onChange={(enabled) => void setExperimentalPlusNativeContext(enabled)}
           />
         </SettingRow>
         <SettingRow body={copy.preparedWebSessionBody} label={copy.preparedWebSession}>
@@ -672,7 +703,8 @@ export function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
-        <SettingRow body={snapshot.state.browserInteractionMode === "manual" ? copy.manualBiggerContextBody : copy.biggerContextBody} label={copy.biggerContext}>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual" ? copy.manualBiggerContextBody
+          : copy.biggerContextBody} label={copy.biggerContext}>
           <Switch
             checked={biggerContextState.checked}
             disabled={biggerContextState.disabled}

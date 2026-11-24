@@ -47,7 +47,7 @@ async function stopChild(child) {
   }
 }
 
-async function runBrowserHelperOperation({ helper, descriptorPath, appName, brokerSocketPath, operation, payload = {}, logger }) {
+async function runBrowserHelperOperation({ helper, descriptorPath, appName, brokerSocketPath, useSavedChats = false, operation, payload = {}, logger }) {
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
@@ -122,6 +122,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, brok
             appName,
             browserHostDescriptorPath: descriptorPath,
             ...(brokerSocketPath ? { brokerSocketPath } : {}),
+            useSavedChats,
           },
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         return;

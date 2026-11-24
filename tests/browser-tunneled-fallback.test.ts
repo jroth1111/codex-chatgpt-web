@@ -1,20 +1,26 @@
 import { expect, spyOn, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPLETION_ACTION_GRACE_MS, ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
+import { isSelectedChatGptTurnUrl } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
+import { ChatGptTurnLiveness } from "../src/adapters/chatgpt-web/turn-liveness";
+import { BrowserDiagnosticHistory } from "../src/adapters/chatgpt-web/browser-diagnostic-history";
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_COMPOSER_SELECTOR, CHATGPT_EFFORT_CONTROL_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR, CHATGPT_TEMPORARY_CHAT_URL, CHATGPT_USER_TURN_SELECTOR } from "../src/chatgpt-session";
+import { chatGptTurnContainerSelector } from "../src/chatgpt-ui/turns";
 import type { BrokerTurnOutputEvent } from "../src/adapters/chatgpt-web/turn-broker-protocol";
 import { activeCompactionToolResultInstruction } from "../src/adapters/chatgpt-web/native-compaction-control";
 import { publishPendingFinalizationOutput, submitTurnOutput, waitForTurnOutput, sealTurnOutput, resetTurnOutput } from "../src/adapters/chatgpt-web/turn-broker-output";
 import type { TurnChannel } from "../src/adapters/chatgpt-web/turn-broker-state";
 import { chatGptSameSurfaceRecoveryDecision, CHATGPT_SAME_SURFACE_RECOVERY_PROMPT } from "../src/adapters/chatgpt-web/runtime-lifecycle";
 import { chatGptSameSurfaceRecoveryPrompt } from "../src/adapters/chatgpt-web/same-surface-recovery";
+import { createChatGptSameSurfaceRetry } from "../src/adapters/chatgpt-web/same-surface-recovery";
+import { ChatGptTurnSession, ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import * as launcherControl from "../src/launcher-browser-host";
 const hostSource = createRequire(import.meta.url).resolve("../launcher/electron/browser-host.cjs");
 const hostRequire = createRequire(hostSource);
@@ -28,7 +34,22 @@ const { BrowserHost } = hostModule.exports;
 const OLD = "Review in progress.";
 const FINAL = "Findings: No blocking defects. Review complete.";
 
+test("selected-mode URL validation keeps both response paths inside their exact chat mode", () => {
+  for (const [url, temporary, saved] of [
+    ["https://chatgpt.com/", false, true], ["https://chatgpt.com/c/owned", false, true],
+    ["https://chatgpt.com/?temporary-chat=true", true, false],
+    ["https://chatgpt.com/c/owned?temporary-chat=true", true, false],
+    ["https://chatgpt.com/settings", false, false], ["https://chatgpt.com/c/a/b", false, false],
+    ["https://chatgpt.com.evil.test/", false, false], ["http://chatgpt.com/", false, false],
+    ["not a URL", false, false],
+  ] as const) {
+    expect(isSelectedChatGptTurnUrl(url, false)).toBe(temporary);
+    expect(isSelectedChatGptTurnUrl(url, true)).toBe(saved);
+  }
+});
+
 async function runFixture(options: {
+  diagnosticsRoot?: string;
   manualApproval?: boolean;
   approvalOutcome?: "timeout" | "aborted";
   stale?: boolean; tunneledFinal?: boolean; steering?: boolean; batches?: number;
@@ -37,14 +58,20 @@ async function runFixture(options: {
   compactionSettlement?: boolean;
   emptyStopped?: boolean; recoveryFails?: boolean; composerBusy?: boolean; stoppedThinking?: boolean;
   postToolRecovery?: boolean;
+  delayedAtomicFinalMs?: number;
+  partialStopped?: boolean;
   composerBusyAfterAdmission?: boolean;
   boundRecoveryParagraphs?: boolean;
   localizedGeneration?: boolean;
+  streamingGeneration?: boolean;
+  keepResponseStreamAfterFinal?: boolean;
+  turnTimeoutMs?: number;
   lateFinalBeforeRecoverySend?: boolean;
   lateFinalAfterFinalizationCas?: boolean;
   lateDomFinalBeforeRecoverySend?: boolean;
   lateDomFinalAfterFinalizationCas?: boolean;
   finalizationRevisionChanged?: boolean;
+  finalizationCancellations?: number;
   generationResumesBeforeRecoveryInsertion?: boolean;
   generationResumesAtRecoveryInsertion?: boolean;
   draftDuringFinalization?: boolean;
@@ -53,6 +80,10 @@ async function runFixture(options: {
   recoverySendActivationCallback?: boolean;
   finalDuringRecoverySubmission?: boolean;
   recoveryReceiptFails?: boolean;
+  remainingWorkAfterRecovery?: boolean;
+  pauseAfterRecoveryWork?: boolean;
+  errorRecovery?: BrowserTurn["retryPromptForError"];
+  onToolSettled?: () => void;
   steeringBeforeRecoverySend?: boolean;
   recentToolProgress?: boolean;
   delayedSecondBatch?: boolean;
@@ -63,9 +94,13 @@ async function runFixture(options: {
   untunneled?: boolean;
   conversationRoute?: string;
   initialRoute?: string;
+  useSavedChats?: boolean;
+  deliveryTimeout?: boolean;
+  finalDuringDeliveryInspection?: boolean;
+  progressScenario?: "status" | "native-tool" | "static" | "foreign";
 } = {}) {
   const recoverable = options.emptyStopped || options.postToolRecovery;
-  const diagnostics = mkdtempSync(join(tmpdir(), "boole-browser-"));
+  const diagnostics = options.diagnosticsRoot ?? mkdtempSync(join(tmpdir(), "boole-browser-"));
   const progress = new ChatGptExternalTurnProgress();
   const actions: string[] = [];
   const selections: Array<{ url: string; model: string; effort: string; family?: string }> = [];
@@ -79,6 +114,9 @@ async function runFixture(options: {
   let now = Date.now();
   const clock = spyOn(Date, "now").mockImplementation(() => now);
   let submitted = 0;
+  let progressObservations = 0;
+  const progressTimes: number[] = [];
+  let progressStartedAt = now;
   let composerText = options.composerBusy ? "User draft" : "";
   // Recorded Web behavior: the sent app mention does not bind the next message.
   let currentMessageConnector = false;
@@ -108,10 +146,12 @@ async function runFixture(options: {
   let snapshotsBeforeDispatch = 0;
   let domWaits = 0;
   let lastToolResultAt = now;
+  let streamRequest: any;
   let fallbackAgeMs: number | undefined;
   let recoveryDecisionAgeMs: number | undefined;
   let resumedGenerationChecks = 0;
   let finalizationStarted = false;
+  let finalizationCancellations = options.finalizationCancellations ?? 0;
   let finalAnswerAdmissionSealed = false;
   let recoveryGuardNonce: string | undefined;
   let recoveryGuardSent = false;
@@ -126,25 +166,29 @@ async function runFixture(options: {
     progress.recordToolResult();
     lastToolResultAt = now;
     actions.push("tool-settled");
-    if (options.toolBatchAtRecoveryInsertion && actions.includes("recovery-tool-started")) {
+    options.onToolSettled?.();
+    if (options.toolBatchAtRecoveryInsertion && actions.includes("recovery-tool-started")
+      || options.remainingWorkAfterRecovery && actions.includes("remaining-work-started") && !options.pauseAfterRecoveryWork) {
       submitTurnOutput(channel, "final", FINAL);
     }
     if (options.finalAfterToolWithoutAssistantTurn) submitTurnOutput(channel, "final", FINAL);
     remainingBatches--;
     if (remainingBatches > 0) {
-      text = options.emptyStopped ? "" : "Intermediate review.";
+      text = options.partialStopped ? "Partial review in progress." : options.emptyStopped ? "" : "Intermediate review.";
       if (options.delayedSecondBatch) pendingSecondBatch = true;
       else progress.recordToolBatch(1);
     } else if (options.unsettledBaseline) text = OLD;
-    else if (!options.stale) text = options.emptyStopped ? "" : FINAL;
+    else if (!options.stale) text = options.partialStopped ? "Partial review in progress." : options.emptyStopped ? "" : FINAL;
   };
   const hidden: any = {
+    locator() { return this; },
     count: async () => 0, isVisible: async () => false,
     filter() { return this; }, first() { return this; }, last() { return this; }, nth() { return this; },
     getByText() { return this; }, getByRole() { return this; }, getByTestId() { return this; },
   };
   const response: any = {
     ...hidden,
+    locator: () => hidden,
     count: async () => 1,
     evaluate: async () => text,
   };
@@ -152,6 +196,18 @@ async function runFixture(options: {
     ...hidden, nth: () => response, page: () => page,
     evaluateAll: async () => {
       now += options.recentToolProgress ? 500 : options.emptyStopped ? 15_000 : 61_000; // Advance observation time, never sleep to guess tool completion.
+      if (options.delayedAtomicFinalMs && actions.includes("tool-settled")
+        && now - lastToolResultAt >= options.delayedAtomicFinalMs && !actions.includes("delayed-atomic-final")) {
+        actions.push("delayed-atomic-final");
+        submitTurnOutput(channel, "final", FINAL);
+      }
+      if (streamRequest && now - lastToolResultAt >= 300_000) {
+        if (!options.keepResponseStreamAfterFinal) page.emit("requestfinished", streamRequest);
+        streamRequest = undefined;
+        actions.push(options.keepResponseStreamAfterFinal ? "final-on-open-stream" : "response-stream-settled");
+        submitTurnOutput(channel, "final", FINAL);
+      }
+      if (options.progressScenario && submitted && ++progressObservations === 9) submitTurnOutput(channel, "final", FINAL);
       if (pendingSecondBatch && now - lastToolResultAt >= 75_000) {
         pendingSecondBatch = false;
         progress.recordToolBatch(1);
@@ -165,7 +221,7 @@ async function runFixture(options: {
         text = FINAL;
         pendingResult = false;
       }
-      const projected = (options.missingAssistantTurn && !actions.includes("tool-dispatched"))
+      const projected = options.progressScenario === "foreign" || (options.missingAssistantTurn && !actions.includes("tool-dispatched"))
         || options.finalAfterToolWithoutAssistantTurn ? 0 : submitted;
       const identities = ["historical", ...Array.from({ length: projected }, (_, index) => `current${index || ""}`)];
       return { count: identities.length, lastId: identities.at(-1), identities };
@@ -173,10 +229,23 @@ async function runFixture(options: {
   };
   const page: any = Object.assign(new EventEmitter(), {
     isClosed: () => false, url: () => submitted && options.conversationRoute || options.initialRoute || CHATGPT_TEMPORARY_CHAT_URL, evaluate: async () => ({}),
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
+    mainFrame: () => page,
+    getByText: () => hidden,
     keyboard: { press: async () => { actions.push("composer-end"); } },
     locator: (selector: string) => {
-      if (options.manualApproval && selector === '[role="dialog"], [data-testid="tool-approval-card"]') return approvalDialog;
+      if (Array.from({ length: submitted }, (_, index) => chatGptTurnContainerSelector(`current${index || ""}`)).includes(selector)) return Object.assign(response, {
+        evaluateAll: async () => {
+          actions.push("delivery-alert-inspected");
+          if (options.finalDuringDeliveryInspection) submitTurnOutput(channel, "final", FINAL);
+          return options.deliveryTimeout === true;
+        },
+      });
+      if (options.manualApproval && selector === '[role="dialog"], [data-testid="tool-approval-card"], [data-codex-approval-surface="true"]') return approvalDialog;
       if (selector === CHATGPT_ASSISTANT_TURN_SELECTOR) return turns;
+      if (selector === CHATGPT_STOP_BUTTON_SELECTOR && options.progressScenario) return {
+        ...hidden, isVisible: async () => submitted > 0 && progressObservations < 9,
+      };
       if (selector === CHATGPT_USER_TURN_SELECTOR) return { ...hidden, evaluateAll: async () => [] };
       if (selector === "[data-turn-id-container], [data-turn-key]") return {
         evaluateAll: async () => ["historical", ...Array.from({ length: submitted }, (_, index) => `current${index || ""}`)],
@@ -231,15 +300,20 @@ async function runFixture(options: {
   });
   let approvalShown = options.manualApproval === true;
   let approvalReads = 0;
-  const approvalDialog: any = { ...hidden, waitFor: async () => {}, isVisible: async () => {
+  const approvalDialog: any = { ...hidden, count: async () => approvalShown ? 1 : 0, waitFor: async () => {}, isVisible: async () => {
     if (++approvalReads > 1 && approvalShown) {
       if (options.approvalOutcome === "aborted") controller.abort();
       else if (approvalVisibility.at(-1) === false && !options.approvalOutcome) approvalShown = false; // User can only approve through the unlocked UI.
       else now += 60_001; // A blocked user reaches the production manual-approval deadline.
     }
     return approvalShown;
-  }, getByRole: (_role: string, query: { name: string }) => ({ ...hidden,
-    waitFor: async () => {}, press: async () => { actions.push(`approval-${query.name}`); approvalShown = false; },
+  }, getByRole: (_role: string, query: { name: string | RegExp }) => ({ ...hidden,
+    count: async () => 1, waitFor: async () => {}, click: async () => {
+      const label = ["Allow once", "Deny"].find(label => typeof query.name === "string"
+        ? label === query.name : query.name.test(label));
+      if (!label) throw Error("No matching approval button in fixture");
+      actions.push(`approval-${label}`); approvalShown = false;
+    },
   }) };
   const approvalControl = options.manualApproval ? spyOn(launcherControl, "notifyLauncherTurn").mockImplementation(async (_path, activity) => {
     expect(activity.phase).toBe("approval");
@@ -252,7 +326,11 @@ async function runFixture(options: {
   if (options.manualApproval) approvalHost.syncViewVisibility();
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics, autoApproveToolCalls: false,
+      useSavedChats: options.useSavedChats === true,
+      turnTimeoutMs: options.turnTimeoutMs,
       ...(options.manualApproval ? { browserHostDescriptorPath: "fixture-control" } : {}) },
+    // Date.now is already controlled by this fixture; yield I/O without a real 250ms poll.
+    pauseObservation: () => { actions.push("observation-poll"); return new Promise<void>(resolve => setImmediate(resolve)); },
     finalizingRuns: new Set<string>(),
     takePreemptiveRetry: () => {
       if (options.steeringBeforeRecoverySend && actions.includes("insert") && !actions.includes("steering-issued")) {
@@ -387,7 +465,11 @@ async function runFixture(options: {
       return {
         responsePresent: !(options.missingBaseline && progress.snapshot().activeToolCalls),
         visibleText: projectedText, fullHtml: projectedText, plainTextFallback: projectedText,
-        markdownSegments: [], markdownRoots: [], traceBlocks: [], nativeToolCandidates: [],
+        markdownSegments: [], markdownRoots: [],
+        traceBlocks: options.progressScenario ? [{ kind: "status", key: "thinking",
+          text: options.progressScenario === "status" ? `Étape de réflexion ${progressObservations}` : "Réflexion" }] : [],
+        nativeToolCandidates: options.progressScenario === "native-tool" ? [{ kind: "native_tool",
+          withinStreamingStatus: true, ancestorsVisible: true, ariaBusy: true, runningFiniteAnimation: false }] : [],
         completionActionVisible: !options.emptyStopped || actions.includes("late-dom-final")
           || Boolean(options.settledPreToolProjection && progress.snapshot().activeToolCalls),
         globalCompletionActionVisible: !options.emptyStopped || actions.includes("late-dom-final")
@@ -412,6 +494,15 @@ async function runFixture(options: {
       release: () => { actions.push("release"); } }),
     onSubmitted: () => {
       actions.push("submitted");
+      progressStartedAt = now;
+      if (options.streamingGeneration) {
+        const request = streamRequest = { method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation",
+          frame: () => page.mainFrame(), postDataJSON: () => ({ model: "gpt-6" }) };
+        page.emit("request", request);
+        page.emit("response", { request: () => request, status: () => 200,
+          headers: () => ({ "content-type": "text/event-stream" }), text: async () => "data: [DONE]\n\n" });
+        actions.push("response-stream-started");
+      }
       if (options.untunneled) batch = progress.recordToolBatch(1);
     }, onTextDelta: delta => { deltas.push(delta); },
     onSendActivated: () => {
@@ -421,7 +512,9 @@ async function runFixture(options: {
       }
     },
     onCommentary: text => { commentary.push(text); },
+    onProgress: () => { progressTimes.push(now); },
     retryPromptForError: async (error, attempt) => {
+      if (options.errorRecovery) return options.errorRecovery(error, attempt);
       if (!recoverable) return undefined;
       if (pendingSecondBatch) actions.push("recovery-before-delayed-tool");
       if (options.emptyStopped) recoveryDecisionAgeMs = now - lastToolResultAt;
@@ -455,6 +548,7 @@ async function runFixture(options: {
     },
     beginFinalizationOnly: async revision => {
       actions.push(`finalization-only:${revision}`);
+      if (finalizationCancellations > 0) { finalizationCancellations--; return false; }
       if (options.draftDuringFinalization) {
         composerText = "User draft during CAS";
         actions.push("user-draft-during-cas");
@@ -469,21 +563,27 @@ async function runFixture(options: {
         return false;
       }
       if (channel.outputFinalSequence !== undefined) return false;
-      if (!finalizationStarted && revision === 1) {
+      if (!finalizationStarted && revision === (channel.activityRevision || 1)) {
         finalizationStarted = true;
         channel.finalizationOnly = true;
-        channel.activityRevision = 2;
+        channel.activityRevision = revision + 1;
         return true;
       }
       return false;
     },
     cancelFinalizationOnly: async revision => {
       actions.push(`finalization-cancel:${revision}`);
-      if (!finalizationStarted || revision !== 2 || channel.finalizationOutputArmed) return false;
+      if (!finalizationStarted || revision !== channel.activityRevision || channel.finalizationOutputArmed) return false;
       finalizationStarted = false;
       channel.finalizationOnly = false;
-      channel.activityRevision = 3;
+      channel.activityRevision += 1;
       publishPendingFinalizationOutput(channel);
+      if (recoverable && submitted >= 2 && !options.recoveryFails) {
+        if (options.remainingWorkAfterRecovery && submitted === 2) {
+          progress.recordToolBatch(1);
+          actions.push("remaining-work-started");
+        } else submitTurnOutput(channel, "final", FINAL);
+      }
       return true;
     },
     armFinalizationOutput: async revision => {
@@ -492,13 +592,14 @@ async function runFixture(options: {
       channel.finalizationOutputArmed = true;
       channel.activityRevision = 3;
       publishPendingFinalizationOutput(channel);
-      if (recoverable && submitted === 2 && !options.recoveryFails) {
+      if (recoverable && submitted === 2 && !options.recoveryFails && !options.remainingWorkAfterRecovery) {
         submitTurnOutput(channel, "final", FINAL);
       }
       return true;
     },
     tunneledOutput: options.untunneled ? undefined : {
       next: (after, signal) => {
+        if (options.progressScenario) return waitForTurnOutput(channel, after, signal);
         if (recoverable) {
           if (!batch) batch = progress.recordToolBatch(1);
           return waitForTurnOutput(channel, after, signal);
@@ -542,7 +643,7 @@ async function runFixture(options: {
     warn.mockRestore();
     approvalControl?.mockRestore();
     progress.retire(new Error("fixture finished"));
-    rmSync(diagnostics, { recursive: true, force: true });
+    if (!options.diagnosticsRoot) rmSync(diagnostics, { recursive: true, force: true });
   }
   expect(pendingReaders).toBe(0);
   expect(channel.outputWaiters.size).toBe(0);
@@ -552,24 +653,56 @@ async function runFixture(options: {
     expect(actions.filter(a => a === "submitted")).toHaveLength(options.tunneledRetry ? 2 : 1);
   }
   return { answer, error, actions, deltas, snapshotsBeforeDispatch, logs, commentary, composerText,
-    fallbackAgeMs, recoveryDecisionAgeMs, selections, approvalVisibility, approvalTab, otherTab };
+    fallbackAgeMs, recoveryDecisionAgeMs, selections, progressTimes, progressStartedAt, approvalVisibility, approvalTab, otherTab };
 }
+
+test("successful worker turns preserve the earlier failed diagnostic history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "worker-diagnostic-retention-"));
+  const failure = join(root, "previous-failure");
+  const history = new BrowserDiagnosticHistory(root, failure);
+  try {
+    history.start();
+    writeFileSync(join(failure, "01-turn-failed.json"), "{}");
+    history.finish("failed");
+    const recent = new Date(Date.now() - 1_000);
+    utimesSync(failure, recent, recent);
+    for (let index = 0; index < 10; index++) {
+      const result = await runFixture({ diagnosticsRoot: root, tunneledFinal: true });
+      expect(result.error).toBeUndefined();
+      expect(result.answer).toBe(FINAL);
+    }
+    expect(existsSync(join(failure, "01-turn-failed.json"))).toBeTrue();
+    const states = readdirSync(root).map(name => JSON.parse(readFileSync(join(root, name, ".trace-state"), "utf8")));
+    expect(states.filter(state => state.status === "completed")).toHaveLength(10);
+    expect(states.filter(state => state.status === "failed")).toHaveLength(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("native fallback observation uses the worker scheduler while preserving final and tool settlement", async () => {
+  const result = await runFixture();
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.actions).toContain("observation-poll");
+  expect(result.actions.indexOf("tool-settled")).toBeLessThan(result.actions.indexOf("output-seal"));
+});
 
 test.each([false, true])("manual approval restores its owned protection (DOM=%s)", async untunneled => {
   for (const approvalOutcome of [undefined, "timeout", "aborted"] as const) {
   const result = await runFixture({ manualApproval: true, untunneled, approvalOutcome });
   if (approvalOutcome === "aborted") expect(result.error).toBeInstanceOf(DOMException);
+  else if (approvalOutcome === "timeout") expect(result.error).toMatchObject({ code: "chatgpt_tool_approval_required", status: 403 });
   else expect(result.error).toBeUndefined();
   expect(result.actions.filter(action => action.startsWith("approval-pending:"))).toEqual([
     "approval-pending:true", "approval-pending:false",
   ]);
   expect(result.actions).toContain("approval-focus");
-  if (approvalOutcome === "timeout") expect(result.actions).toContain("approval-Deny");
-  else expect(result.actions).not.toContain("approval-Deny");
+  expect(result.actions).not.toContain("approval-Deny");
   expect(result.approvalVisibility).toEqual([true, false, true]);
   expect(result.approvalTab.interactionLocked).toBe(true);
   expect((result.otherTab as any).approvalPending).toBeUndefined();
-  if (approvalOutcome !== "aborted") expect(result.answer).toBe(FINAL);
+  if (!approvalOutcome) expect(result.answer).toBe(FINAL);
   }
 });
 
@@ -584,12 +717,14 @@ async function runLateCompletionActionFixture() {
   let now = 100_000;
   const clock = spyOn(Date, "now").mockImplementation(() => now);
   const hidden: any = {
+    locator() { return this; },
+    evaluateAll: async (read: (elements: Element[]) => unknown) => read([]),
     count: async () => 0, isVisible: async () => false,
     filter() { return this; }, first() { return this; }, last() { return this; }, nth() { return this; },
     getByText() { return this; }, getByRole() { return this; }, getByTestId() { return this; },
   };
-  const historical: any = { ...hidden, count: async () => 1 };
-  const current: any = { ...hidden, count: async () => 1 };
+  const historical: any = { ...hidden, locator: () => hidden, count: async () => 1 };
+  const current: any = { ...hidden, locator: () => hidden, count: async () => 1 };
   const turns: any = {
     ...hidden,
     nth: (index: number) => index === 0 ? historical : current,
@@ -600,8 +735,10 @@ async function runLateCompletionActionFixture() {
   };
   const page: any = Object.assign(new EventEmitter(), {
     isClosed: () => false,
+    getByText: () => hidden,
     url: () => submitted ? "https://chatgpt.com/c/current?temporary-chat=true" : CHATGPT_TEMPORARY_CHAT_URL,
     evaluate: async () => ({}),
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     locator: (selector: string) => {
       if (selector === CHATGPT_ASSISTANT_TURN_SELECTOR) return turns;
       if (selector === CHATGPT_USER_TURN_SELECTOR) return { ...hidden, evaluateAll: async () => [] };
@@ -655,7 +792,7 @@ async function runLateCompletionActionFixture() {
     },
     waitForTurnDomOrExternalProgress: async () => {
       waitCount++;
-      now += waitCount === 1 ? 60_000 : waitCount === 2 ? 1 : 2_000;
+      now += waitCount === 1 ? CHATGPT_COMPLETION_ACTION_GRACE_MS : waitCount === 2 ? 1 : 2_000;
     },
     stalledTurnDiagnostic: async () => "fixture stable DOM",
   });
@@ -680,6 +817,42 @@ async function runLateCompletionActionFixture() {
   }
 }
 
+test("a delayed atomic Native final arrives on the original submission without recovery", async () => {
+  const result = await runFixture({ emptyStopped: true, delayedAtomicFinalMs: 180_000 });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.deltas).toEqual([FINAL]);
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions.filter(action => action === "tool-dispatched")).toHaveLength(1);
+  expect(result.actions.filter(action => action === "fence-commit")).toHaveLength(1);
+  expect(result.actions).toContain("delayed-atomic-final");
+  expect(result.recoveryDecisionAgeMs).toBeUndefined();
+});
+
+test("partial nonterminal DOM preserves the original tunnel for a delayed atomic final", async () => {
+  const result = await runFixture({ emptyStopped: true, partialStopped: true, delayedAtomicFinalMs: 125_000 });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.deltas).toEqual([FINAL]);
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions.filter(action => action === "tool-dispatched")).toHaveLength(1);
+  expect(result.actions.filter(action => action === "fence-commit")).toHaveLength(1);
+  expect(result.actions).toContain("snapshot:Partial review in progress.");
+  expect(result.actions).toContain("delayed-atomic-final");
+  expect(result.actions).not.toContain("output-seal");
+  expect(result.recoveryDecisionAgeMs).toBeUndefined();
+});
+
+test("waiting for a partial response never extends the configured turn deadline", async () => {
+  const result = await runFixture({ emptyStopped: true, partialStopped: true,
+    delayedAtomicFinalMs: 240_000, turnTimeoutMs: 90_000 });
+  expect(String(result.error)).toContain("timed out");
+  expect(result.answer).toBeUndefined();
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions).not.toContain("delayed-atomic-final");
+  expect(result.actions).not.toContain("output-seal");
+});
+
 test("a stopped empty Web response continues once before sealing the native output channel", async () => {
   const result = await runFixture({ emptyStopped: true });
   expect(result.error).toBeUndefined();
@@ -690,7 +863,7 @@ test("a stopped empty Web response continues once before sealing the native outp
   expect(result.actions.filter(a => a === "tool-dispatched")).toHaveLength(1);
   expect(result.actions.filter(a => a === "fence-commit")).toHaveLength(1);
   expect(result.actions).toContain("recovery:eligible");
-  expect(result.recoveryDecisionAgeMs).toBeGreaterThanOrEqual(60_000);
+  expect(result.recoveryDecisionAgeMs).toBeGreaterThanOrEqual(CHATGPT_COMPLETION_ACTION_GRACE_MS);
   expect(result.actions).not.toContain("output-seal");
 });
 
@@ -711,6 +884,79 @@ test("localized ongoing generation after settled native tools does not trigger f
   expect(result.actions).not.toContain("recovery:eligible");
   expect(result.actions.filter(action => action === "send")).toHaveLength(1);
   expect(result.actions.some(action => action.startsWith("finalization-only:"))).toBe(false);
+});
+
+test("an owned open response stream without Stop preserves tools and waits for the atomic final", async () => {
+  const result = await runFixture({ emptyStopped: true, streamingGeneration: true });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.actions).toContain("response-stream-settled");
+  expect(result.actions).not.toContain("recovery:eligible");
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions.some(action => action.startsWith("finalization-only:"))).toBe(false);
+});
+
+test.each(["https://chatgpt.com/", "https://chatgpt.com/c/saved"])("Saved Chat tunnel on %s preserves one submission and atomic final", async url => {
+  const result = await runFixture({ emptyStopped: true, streamingGeneration: true,
+    useSavedChats: true, initialRoute: url, conversationRoute: url });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.deltas).toEqual([FINAL]);
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions).not.toContain("recovery:eligible");
+});
+
+test("an owned open response stream never extends the hard turn deadline", async () => {
+  const result = await runFixture({ emptyStopped: true, streamingGeneration: true, turnTimeoutMs: 180_000 });
+  expect(String(result.error)).toContain("timed out");
+  expect(result.actions).not.toContain("response-stream-settled");
+  expect(result.actions).not.toContain("recovery:eligible");
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+});
+
+test("an accepted atomic final does not wait for an idle response stream to close", async () => {
+  const result = await runFixture({ emptyStopped: true, streamingGeneration: true,
+    keepResponseStreamAfterFinal: true, turnTimeoutMs: 600_000 });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.actions).toContain("final-on-open-stream");
+  expect(result.actions).not.toContain("recovery:eligible");
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+});
+
+test("worker heartbeat records liveness timing without adding visible output or another send", async () => {
+  const result = await runFixture({ emptyStopped: true, streamingGeneration: true });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.logs.some(line => line.includes("worker_liveness=") && line.includes('"elapsedMs":'))).toBe(true);
+  expect(result.commentary.join(" ")).not.toContain("worker_liveness");
+  expect(result.deltas.join("")).toBe(FINAL);
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+});
+
+test("liveness diagnostics distinguish idle heartbeats, output and native progress with bounded duration warnings", () => {
+  let now = 0;
+  const timer = new ChatGptTurnLiveness(() => now);
+  expect(timer.heartbeat()?.timing.outputProgressAgeMs).toBeNull();
+  now = 10_000;
+  timer.submitted(); timer.generation();
+  expect(timer.heartbeat()).toBeUndefined();
+  now = 60_000;
+  expect(timer.heartbeat()?.timing).toMatchObject({ elapsedMs: 60_000, submittedAgeMs: 50_000,
+    heartbeatGapMs: 50_000, outputProgressAgeMs: null, generationSignalAgeMs: 50_000 });
+  timer.progress();
+  now = 600_000;
+  expect(timer.heartbeat({ revision: 1, lastToolBatchRevision: 1, activeToolCalls: 1, lastProgressAt: 900 }, 1000))
+    .toMatchObject({ level: "warn", timing: { elapsedMs: 600_000, outputProgressAgeMs: 540_000,
+      nativeProgressAgeMs: 100, activeToolCalls: 1, longRunning: true } });
+  now = 610_000;
+  expect(timer.heartbeat()).toBeUndefined();
+  now = 660_000;
+  expect(timer.heartbeat()?.level).toBe("info");
+  now = 1_200_000;
+  expect(timer.heartbeat()?.level).toBe("warn");
+  // Browser deadlines, broker state and visible feeds are not available to this sampler.
+  expect(timer.heartbeat()).toBeUndefined();
 });
 
 test("a settled tool can be followed by another tool after a long reasoning gap", async () => {
@@ -750,6 +996,31 @@ test("final retry re-proves the same model and effort after Temporary Chat acqui
     { url: CHATGPT_TEMPORARY_CHAT_URL, model: "gpt-5.6-sol", effort: "xhigh", family: "5.6" },
     { url: conversationRoute, model: "gpt-5.6-sol", effort: "xhigh", family: "5.6" },
   ]);
+});
+
+test("Saved Chat first-answer retry re-proves effort after its home acquires a conversation URL", async () => {
+  const initialRoute = "https://chatgpt.com/", conversationRoute = "https://chatgpt.com/c/new-saved";
+  const result = await runFixture({ emptyStopped: true, useSavedChats: true, initialRoute, conversationRoute });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.actions.filter(action => action === "send")).toHaveLength(2);
+  expect(result.selections.map(selection => selection.url)).toEqual([initialRoute, conversationRoute]);
+  expect(result.selections.every(selection => selection.model === "gpt-5.6-sol"
+    && selection.effort === "xhigh" && selection.family === "5.6")).toBeTrue();
+});
+
+test("Saved Chat retry cannot transfer selection to another existing conversation or chat mode", async () => {
+  for (const [conversationRoute, error] of [
+    ["https://chatgpt.com/c/unrelated", { code: "upstream_server_error", retryable: false }],
+    ["https://chatgpt.com/c/owned?temporary-chat=true", { code: "chatgpt_surface_changed", retireSession: true }],
+  ] as const) {
+    const result = await runFixture({ emptyStopped: true, useSavedChats: true,
+      initialRoute: "https://chatgpt.com/c/owned", conversationRoute });
+    expect(result.error).toMatchObject(error);
+    expect(result.answer).toBeUndefined();
+    expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+    expect(result.selections).toHaveLength(1);
+  }
 });
 
 test("final retry cannot transfer the selected model to a different existing conversation", async () => {
@@ -811,12 +1082,61 @@ test("a late Native final cancels an attached recovery prompt before send and re
   expect(result.actions).toContain("clear");
 });
 
-test("a late Native final after finalization CAS is buffered until recovery submission is armed", async () => {
+test.each([
+  [{ lateFinalBeforeRecoverySend: true }, "finalization_cas_rejected", undefined],
+  [{ lateDomFinalBeforeRecoverySend: true, settledPreToolProjection: true }, "before_cas_guard_rejected", "response_changed"],
+  [{ lateDomFinalAfterFinalizationCas: true, settledPreToolProjection: true }, "after_cas_guard_rejected", "response_changed"],
+  [{ generationResumesAtRecoveryInsertion: true }, "insertion_guard_rejected", "generation_running"],
+  [{ toolBatchAtRecoveryInsertion: true }, "insertion_guard_rejected", "tool_work_in_flight"],
+] as const)("cancelled worker recovery reports its boundary without asserting send acceptance (%j)", async (options, reason, guardReason) => {
+  const root = mkdtempSync(join(tmpdir(), "cancelled-recovery-diagnostics-"));
+  try {
+    const result = await runFixture({ emptyStopped: true, diagnosticsRoot: root, ...options });
+    expect(result.error).toBeUndefined();
+    expect(result.answer).toBe(FINAL);
+    expect(result.actions.filter(action => action === "submitted")).toHaveLength(1);
+    const checkpoints = readdirSync(root).flatMap(name => readdirSync(join(root, name)));
+    expect(checkpoints.filter(name => /^\d+-send-accepted\.json$/.test(name))).toHaveLength(1);
+    expect(result.logs.filter(line => line.includes("recovery_cancelled "))).toEqual([
+      `info:[chatgpt-web] browser turn boole_fallback_fixture recovery_cancelled reason=${reason}`
+        + (guardReason ? ` guardReason=${guardReason}` : ""),
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("production retry preserves its submission budget across repeated worker CAS cancellations", async () => {
+  const session = new ChatGptTurnSession({ mode: "tools", token: Promise.resolve("turn_cancelled_budget"),
+    browser: new Promise<string>(() => {}), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {} });
+  session.observeCanonicalRequest({ modelId: "chatgpt-web/high", stream: true,
+    context: { tools: [], messages: [] }, options: {}, _canonicalContextComplete: true });
+  const find = spyOn(chatGptTurnSessions, "find").mockImplementation(() => session);
+  const root = mkdtempSync(join(tmpdir(), "cancelled-recovery-budget-"));
+  try {
+    const errorRecovery = createChatGptSameSurfaceRetry({ traceId: "cancelled_budget", executionKey: "cancelled_budget",
+      enhancedMode: true, outputTunnel: true, turnToken: () => "turn_cancelled_budget", abortSignal: new AbortController().signal });
+    const result = await runFixture({ emptyStopped: true, diagnosticsRoot: root, finalizationCancellations: 2, errorRecovery });
+    expect(result.error).toBeUndefined();
+    expect(result.answer).toBe(FINAL);
+    expect(result.actions.filter(action => action === "send")).toHaveLength(2);
+    expect(result.actions.filter(action => action === "submitted")).toHaveLength(2);
+    expect(result.logs.filter(line => line.includes("recovery_cancelled reason=finalization_cas_rejected"))).toHaveLength(2);
+    const checkpoints = readdirSync(root).flatMap(name => readdirSync(join(root, name)));
+    expect(checkpoints.filter(name => /^\d+-send-accepted\.json$/.test(name))).toHaveLength(2);
+    const bounded = await runFixture({ emptyStopped: true, finalizationCancellations: 100, turnTimeoutMs: 4 * CHATGPT_COMPLETION_ACTION_GRACE_MS,
+      errorRecovery: createChatGptSameSurfaceRetry({ traceId: "bounded_cancellations", executionKey: "cancelled_budget",
+        enhancedMode: true, outputTunnel: true, turnToken: () => "turn_cancelled_budget", abortSignal: new AbortController().signal }) });
+    expect(bounded.error).toMatchObject({ message: "ChatGPT web turn timed out" });
+    expect(bounded.actions.filter(action => action === "submitted")).toHaveLength(1);
+    expect(bounded.logs.filter(line => line.includes("recovery_cancelled reason=finalization_cas_rejected")).length).toBeGreaterThan(1);
+  } finally { find.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a late Native final after finalization CAS is buffered until the submission fence reopens", async () => {
   const result = await runFixture({ emptyStopped: true, lateFinalAfterFinalizationCas: true });
   expect(result.error).toBeUndefined();
   expect(result.answer).toBe(FINAL);
   expect(result.actions).toContain("late-final-buffered");
-  expect(result.actions).toContain("finalization-output-arm:2");
+  expect(result.actions).toContain("finalization-cancel:2");
   expect(result.actions.filter(action => action === "send")).toHaveLength(2);
 });
 
@@ -871,43 +1191,78 @@ test("a tool batch arriving at recovery insertion is still acknowledged and disp
   expect(result.actions.filter(action => action === "send")).toHaveLength(1);
 });
 
+test("recovery reopens unfinished work before accepting the final answer", async () => {
+  const result = await runFixture({ emptyStopped: true, remainingWorkAfterRecovery: true });
+  expect(result.error).toBeUndefined();
+  expect(result.answer).toBe(FINAL);
+  expect(result.actions).toContain("remaining-work-started");
+  expect(result.actions.filter(action => action === "tool-dispatched")).toHaveLength(2);
+  expect(result.actions).toContain("finalization-cancel:2");
+  expect(result.actions).not.toContain("finalization-output-arm:2");
+  expect(result.actions.filter(action => action === "send")).toHaveLength(2);
+});
+
+test("production recovery renews only after new work completes, then delivers one atomic final", async () => {
+  const session = new ChatGptTurnSession({ mode: "tools", token: Promise.resolve("turn_worker_budget"),
+    browser: new Promise<string>(() => {}), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {} });
+  session.observeCanonicalRequest({ modelId: "chatgpt-web/high", stream: true,
+    context: { tools: [], messages: [] }, options: {}, _canonicalContextComplete: true });
+  const find = spyOn(chatGptTurnSessions, "find").mockImplementation(() => session);
+  let settled = 0;
+  try {
+    const errorRecovery = createChatGptSameSurfaceRetry({ traceId: "worker_budget", executionKey: "worker_budget",
+      enhancedMode: true, outputTunnel: true, turnToken: () => "turn_worker_budget", abortSignal: new AbortController().signal });
+    const result = await runFixture({ emptyStopped: true, remainingWorkAfterRecovery: true, pauseAfterRecoveryWork: true,
+      errorRecovery, onToolSettled: () => {
+        const callId = `call_worker_budget_${++settled}`;
+        session.setOutstanding([{ callId, wireName: "exec_command", freeform: false, arguments: {} }]);
+        session.markResultDelivered(callId);
+      } });
+    expect(result.error).toBeUndefined();
+    expect(result.answer).toBe(FINAL);
+    expect(result.deltas).toEqual([FINAL]);
+    expect(result.actions.filter(action => action === "send")).toHaveLength(3);
+    expect(result.actions.filter(action => action === "tool-dispatched")).toHaveLength(2);
+  } finally { find.mockRestore(); }
+});
+
 test("missing-final recovery has no separate send-activation callback after finalization CAS", async () => {
   const result = await runFixture({ emptyStopped: true, recoverySendActivationCallback: true });
   expect(result.error).toBeUndefined();
   expect(result.answer).toBe(FINAL);
   expect(result.actions).not.toContain("recovery-send-activated");
   const finalization = result.actions.indexOf("finalization-only:1");
-  const arm = result.actions.indexOf("finalization-output-arm:2");
+  const resumed = result.actions.indexOf("finalization-cancel:2");
   const recoverySeal = result.actions.findIndex((action, index) =>
     index > finalization && action === "final-answer-admission-sealed");
   const recoveryReopen = result.actions.findIndex((action, index) =>
-    index > arm && action === "final-answer-admission-reopened");
+    index > resumed && action === "final-answer-admission-reopened");
   expect(finalization).toBeLessThan(recoverySeal);
-  expect(recoverySeal).toBeLessThan(arm);
-  expect(arm).toBeLessThan(recoveryReopen);
+  expect(recoverySeal).toBeLessThan(resumed);
+  expect(resumed).toBeLessThan(recoveryReopen);
   expect(result.actions.filter(action => action === "send")).toHaveLength(2);
 });
 
-test("a final submitted while the recovery click is being acknowledged is delivered after arming", async () => {
+test("a final submitted while the recovery click is being acknowledged is delivered after reopening", async () => {
   const result = await runFixture({ emptyStopped: true, finalDuringRecoverySubmission: true });
   expect(result.error).toBeUndefined();
   expect(result.answer).toBe(FINAL);
   expect(result.deltas).toEqual([FINAL]);
-  expect(result.actions.indexOf("send")).toBeLessThan(result.actions.indexOf("finalization-output-arm:2"));
+  expect(result.actions.indexOf("send")).toBeLessThan(result.actions.indexOf("finalization-cancel:2"));
   expect(result.actions.filter(action => action === "send")).toHaveLength(2);
 });
 
-test("an unknown recovery click receipt keeps finalization closed through bounded submission confirmation", async () => {
+test("an unknown recovery click receipt reopens work before bounded submission confirmation", async () => {
   const result = await runFixture({ emptyStopped: true, recoveryReceiptFails: true });
   expect(result.error).toBeUndefined();
   expect(result.answer).toBe(FINAL);
   expect(result.actions.filter(action => action === "send")).toHaveLength(2);
-  expect(result.actions).not.toContain("finalization-cancel:2");
-  expect(result.actions).toContain("finalization-output-arm:2");
-  expect(result.actions.indexOf("finalization-output-arm:2")).toBeLessThan(result.actions.lastIndexOf("submission-confirmed"));
+  expect(result.actions).toContain("finalization-cancel:2");
+  expect(result.actions).not.toContain("finalization-output-arm:2");
+  expect(result.actions.indexOf("finalization-cancel:2")).toBeLessThan(result.actions.lastIndexOf("submission-confirmed"));
 });
 
-test("a final accepted before an unknown recovery receipt is published after arming", async () => {
+test("a final accepted before an unknown recovery receipt is published after reopening", async () => {
   const result = await runFixture({
     emptyStopped: true,
     finalDuringRecoverySubmission: true,
@@ -916,8 +1271,8 @@ test("a final accepted before an unknown recovery receipt is published after arm
   expect(result.error).toBeUndefined();
   expect(result.answer).toBe(FINAL);
   expect(result.deltas).toEqual([FINAL]);
-  expect(result.actions).toContain("finalization-output-arm:2");
-  expect(result.actions).not.toContain("finalization-cancel:2");
+  expect(result.actions).not.toContain("finalization-output-arm:2");
+  expect(result.actions).toContain("finalization-cancel:2");
 });
 
 test("a user draft entered while finalization CAS is pending is preserved", async () => {
@@ -1202,4 +1557,39 @@ test("cancellation during baseline observation cannot release a waiting tool bat
   expect(result.error).toMatchObject({ name: "AbortError" });
   expect(result.actions).not.toContain("tool-dispatched");
   expect(result.deltas).toEqual([]);
+});
+
+for (const scenario of ["status", "native-tool", "static", "foreign"] as const) {
+  test(`tunneled progress observes ${scenario} without treating the stop button as progress`, async () => {
+    const result = await runFixture({ progressScenario: scenario });
+    expect(result.error).toBeUndefined();
+    expect(result.answer).toBe(FINAL);
+    expect(result.deltas).toEqual([FINAL]);
+    expect(result.commentary).toEqual([]);
+    const times = [result.progressStartedAt, ...result.progressTimes];
+    const longestSilence = Math.max(...times.slice(1).map((time, index) => time - times[index]!));
+    if (scenario === "status" || scenario === "native-tool") {
+      expect(result.progressTimes.length).toBeGreaterThan(2);
+      expect(longestSilence).toBeLessThan(300_000);
+    } else {
+      expect(longestSilence).toBeGreaterThan(300_000);
+      expect(result.progressTimes.length).toBeLessThanOrEqual(2);
+    }
+  });
+}
+
+for (const nativeFinal of ["absent", "accepted", "during-inspection"] as const)
+test("delivery alert preserves Native final authority: " + nativeFinal, async () => {
+  const result = await runFixture({ stale: true, emptyStopped: nativeFinal !== "accepted", deliveryTimeout: true,
+    tunneledFinal: nativeFinal === "accepted", finalDuringDeliveryInspection: nativeFinal === "during-inspection" });
+  if (nativeFinal === "absent") {
+    expect(result.error).toMatchObject({ code: "chatgpt_delivery_timeout", status: 503, retryable: true });
+    expect(result.deltas).toEqual([]);
+  } else {
+    expect(result.error).toBeUndefined();
+    expect(result.answer).toBe(FINAL);
+    expect(result.deltas.join("")).toBe(FINAL);
+  }
+  expect(result.actions.filter(action => action === "send")).toHaveLength(1);
+  expect(result.actions.some(action => action.startsWith("recovery:"))).toBeFalse();
 });

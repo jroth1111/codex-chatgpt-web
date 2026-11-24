@@ -1,9 +1,51 @@
+import { launchDomBrowser } from "./support/dom-browser";
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
 import { ChatGptBrowserDiagnostics, readChatGptUpstreamFailureUiState, sanitizeChatGptBrowserDiagnosticState } from "../src/adapters/chatgpt-web/browser-diagnostics";
+import { CHATGPT_UI_VARIANT_SELECTORS, chatGptUiVariantCounts } from "../src/chatgpt-ui/observations";
+
+test("diagnostic capture retains validated UI variant counts without exposing page data", async () => {
+  const root = mkdtempSync(join(tmpdir(), "variant-diagnostics-"));
+  const variants = Object.fromEntries(Object.keys(CHATGPT_UI_VARIANT_SELECTORS).map(name => [name, { attached: 1, rendered: 1 }]));
+  const page = { evaluate: async (callback: unknown) => callback === chatGptUiVariantCounts ? variants : {},
+    locator: () => ({ evaluateAll: async () => undefined }) } as unknown as Page;
+  try {
+    await new ChatGptBrowserDiagnostics("variant_trace", root, true).capture(page, "verification");
+    const directory = readdirSync(root)[0]!;
+    const envelope = JSON.parse(readFileSync(join(root, directory, "01-verification.json"), "utf8"));
+    expect(envelope.uiVariants).toEqual(variants);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("composer diagnostics recognize native textarea editability without recording its content", async () => {
+  const root = mkdtempSync(join(tmpdir(), "textarea-diagnostics-"));
+  const browser = await launchDomBrowser();
+  try {
+    const page = await browser.newPage();
+    const cases = [
+      ['<textarea id="prompt-textarea">private-draft</textarea>', true],
+      ['<textarea id="prompt-textarea" readonly>private-draft</textarea>', false],
+      ['<textarea id="prompt-textarea" disabled>private-draft</textarea>', false],
+      ['<fieldset disabled><textarea id="prompt-textarea">private-draft</textarea></fieldset>', false],
+      ['<div id="prompt-textarea" contenteditable="true">private-draft</div>', true],
+      ['<div id="prompt-textarea" contenteditable="false">private-draft</div>', false],
+      ['<textarea id="prompt-textarea" style="display:none">private-draft</textarea>', false],
+      ['<textarea id="prompt-textarea"></textarea><textarea data-testid="prompt-textarea"></textarea>', false],
+    ] as const;
+    for (const [index, [html, editable]] of cases.entries()) {
+      await page.setContent(`<form>${html}</form>`);
+      const trace = `textarea_case_${index}`;
+      await new ChatGptBrowserDiagnostics(trace, root, true).capture(page, "connector-verification-started");
+      const directory = readdirSync(root).find(name => name.startsWith(trace))!;
+      const content = readFileSync(join(root, directory, "01-connector-verification-started.json"), "utf8");
+      expect(JSON.parse(content).state.composerEditable).toBe(editable);
+      expect(content).not.toContain("private-draft");
+    }
+  } finally { await browser.close(); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
 
 test("upstream failure UI summary records only visible control counts", async () => {
   const selectors: string[] = [];
@@ -57,32 +99,42 @@ const diagnosticState = {
   },
 };
 
-test("repeated attempts retain the first failure and latest attempt without evicting unrelated traces", async () => {
+test("completed retries remain bounded without evicting failed captures from unrelated traces", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-retry-diagnostics-"));
   const page = { evaluate: async () => ({ composerVisible: false }) } as unknown as Page;
   const firstTrace = "original_stall";
+  const capture = async (trace: string, checkpoint: string, status: "failed" | "completed", error?: Error) => {
+    const diagnostics = new ChatGptBrowserDiagnostics(trace, root, true);
+    await diagnostics.capture(page, checkpoint, error);
+    diagnostics.finish(status);
+  };
   try {
-    await new ChatGptBrowserDiagnostics(firstTrace, root, true).capture(page, "initial-failure", new Error("private"));
+    await capture(firstTrace, "initial-failure", "failed", new Error("private"));
     const first = readdirSync(root)[0]!;
-    utimesSync(join(root, first), 1, 1);
+    const recent = new Date(Date.now() - 1_000);
+    utimesSync(join(root, first), recent, recent);
     for (let i = 0; i < 8; i++) {
-      await new ChatGptBrowserDiagnostics(`unrelated_${i}`, root, true).capture(page, "initial");
+      await capture(`unrelated_${i}`, "initial", "failed");
     }
     for (let i = 0; i < 12; i++) {
-      await new ChatGptBrowserDiagnostics(firstTrace, root, true).capture(page, `retry-${i}`, new Error("private"));
+      await capture(firstTrace, `retry-${i}`, "completed");
     }
     const dirs = readdirSync(root);
     expect(dirs).toContain(first);
-    expect(dirs.filter(name => name.startsWith(firstTrace))).toHaveLength(2);
+    expect(dirs.filter(name => name.startsWith(firstTrace))).toHaveLength(11);
     expect(dirs.filter(name => name.startsWith("unrelated_"))).toHaveLength(8);
-    const latest = dirs.find(name => name.startsWith(firstTrace) && name !== first)!;
-    expect(readdirSync(join(root, latest))).toEqual(["01-retry-11.json"]);
+    const latest = dirs.find(name => existsSync(join(root, name, "01-retry-11.json")))!;
+    expect(readdirSync(join(root, latest)).sort()).toEqual([".trace-state", "01-retry-11.json"]);
+    expect(JSON.parse(readFileSync(join(root, latest, ".trace-state"), "utf8")).status).toBe("completed");
     expect(readFileSync(join(root, first, "01-initial-failure.json"), "utf8")).not.toContain("private");
     for (let i = 8; i < 18; i++) {
-      await new ChatGptBrowserDiagnostics(`unrelated_${i}`, root, true).capture(page, "initial");
+      await capture(`unrelated_${i}`, "initial", "completed");
     }
     expect(readdirSync(root).length).toBeLessThanOrEqual(20);
-    expect(new Set(readdirSync(root).map(name => name.replace(/-[a-f0-9]{8}$/, ""))).size).toBe(10);
+    expect(readdirSync(root).filter(name => name.startsWith(firstTrace))).toEqual([first]);
+    for (let i = 0; i < 18; i++) {
+      expect(readdirSync(root).some(name => name.startsWith(`unrelated_${i}-`))).toBeTrue();
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -95,7 +147,7 @@ test("connector verification records only capabilities even when screenshots are
     process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS = "1";
     const page = {
       evaluate: async (evaluator: Function) => {
-        verificationEvaluator = evaluator.toString();
+        if (evaluator !== chatGptUiVariantCounts) verificationEvaluator = evaluator.toString();
         return {
           composerVisible: true, connectorSelected: false, mentionMenuVisible: false,
           effortControlVisible: false, effortItemsVisible: false, menuVisible: false,
@@ -108,8 +160,10 @@ test("connector verification records only capabilities even when screenshots are
     const capture = new ChatGptBrowserDiagnostics("verify_private_trace", root, true);
     await capture.capture(page, "connector-verification-started");
     await capture.capture(page, "connector-verification-failed", new Error("private-error"));
+    capture.finish("failed");
     const directory = join(root, readdirSync(root)[0]!);
-    const files = readdirSync(directory).sort();
+    expect(JSON.parse(readFileSync(join(directory, ".trace-state"), "utf8")).status).toBe("failed");
+    const files = readdirSync(directory).filter(name => name !== ".trace-state").sort();
     expect(files.length).toBe(2);
     expect(screenshots).toBe(0);
     expect(verificationEvaluator).not.toMatch(/location\.href|document\.title|innerText|textContent/);
@@ -138,8 +192,32 @@ function artifact(root: string, extension: string): string {
   return join(directory, name);
 }
 
+test("page-state console output bounds long retained history without truncating disk evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-bounded-log-"));
+  const originalInfo = console.info;
+  const logs: string[] = [];
+  console.info = value => { logs.push(String(value)); };
+  const assistants = Array.from({ length: 1000 }, (_, textChars) => ({ textChars, htmlChars: textChars + 1 }));
+  const state = { ...diagnosticState, turns: { ...diagnosticState.turns, assistant: assistants } };
+  try {
+    await new ChatGptBrowserDiagnostics("bounded-history", root).capture({ evaluate: async () => state } as any, "turn-failed");
+    const line = logs.find(line => line.startsWith("[chatgpt-web] page_state "))!;
+    expect(line.length).toBeLessThan(8_000);
+    const logged = JSON.parse(line.slice("[chatgpt-web] page_state ".length));
+    expect(logged.state.turns.assistant).toEqual({ count: 1000, omitted: 960, recent: assistants.slice(-40) });
+    const disk = JSON.parse(readFileSync(artifact(root, ".json"), "utf8"));
+    expect(disk.state.turns.assistant).toEqual(assistants);
+  } finally {
+    console.info = originalInfo;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("preserves DOM diagnostic JSON when screenshot capture times out", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-browser-diagnostic-"));
+  const originalInfo = console.info;
+  const logs: string[] = [];
+  console.info = value => { logs.push(String(value)); };
   try {
     let screenshotCalls = 0;
     const page = {
@@ -153,8 +231,13 @@ test("preserves DOM diagnostic JSON when screenshot capture times out", async ()
     expect(JSON.stringify(json.state)).not.toMatch(/https:|Temporary Chat|surface-test/);
     expect(json.screenshotError).toBeUndefined();
     expect(screenshotCalls).toBe(0);
+    const logged = JSON.parse(logs.find(line => line.startsWith("[chatgpt-web] page_state "))!.slice("[chatgpt-web] page_state ".length));
+    expect(logged.traceId).toBe("trace_json_survives");
+    expect(logged.state).toEqual(json.state);
+    expect(JSON.stringify(logged)).not.toMatch(/https:|Temporary Chat|surface-test/);
     expect(() => artifact(root, ".png")).toThrow("missing diagnostic .png");
   } finally {
+    console.info = originalInfo;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -228,8 +311,10 @@ test("scopes diagnostic capture to the bound assistant turn", async () => {
     let evaluateSource = "";
     const page = {
       evaluate: async (callback: unknown, argument: unknown) => {
-        evaluateSource = String(callback);
-        evaluateArgument = argument;
+        if (callback !== chatGptUiVariantCounts) {
+          evaluateSource = String(callback);
+          evaluateArgument = argument;
+        }
         return diagnosticState;
       },
       screenshot: async () => Buffer.from("png"),

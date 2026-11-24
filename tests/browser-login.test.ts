@@ -35,7 +35,8 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
     const firstLaunch = launches[0] ?? "";
     expect(firstLaunch).toContain("--new-window");
     expect(firstLaunch).toContain("--user-data-dir=");
-    expect(firstLaunch).toContain(CHATGPT_TEMPORARY_CHAT_URL);
+    expect(firstLaunch.split(/\s+/).filter(value => value.startsWith("https://chatgpt.com/")))
+      .toEqual([CHATGPT_TEMPORARY_CHAT_URL]);
     expect(firstLaunch).not.toContain("--remote-debugging-pipe");
     expect(launches[1]).not.toContain("--headless");
     expect(existsSync(profileDir)).toBe(false);
@@ -74,11 +75,14 @@ test("passkey login authenticates in normal Chrome before isolated offline pipe 
     config.storageStatePath = join(root, "transfer", "storage-state.json");
     let continueLogin!: () => void;
     const continuation = new Promise<void>(resolve => { continueLogin = resolve; });
-    const capture = captureSystemBrowserLogin(config, { continuation, timeoutMs: 5_000 });
+    let browserReady = false;
+    const capture = captureSystemBrowserLogin(config, { continuation, timeoutMs: 5_000,
+      onBrowserReady: () => { browserReady = true; } });
     for (let attempt = 0; attempt < 100 && !existsSync(pidLog); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     expect(existsSync(pidLog)).toBe(true);
+    expect(browserReady).toBe(true);
     continueLogin();
     const error = await capture.then(() => undefined, caught => caught as Error);
     expect(error).toBeInstanceOf(Error);

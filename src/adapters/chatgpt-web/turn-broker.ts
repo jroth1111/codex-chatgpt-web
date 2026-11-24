@@ -1,3 +1,6 @@
+import type { BrokerRetirementDiagnostics } from "./turn-broker-protocol";
+import { ChatGptToolEvidenceGuard } from "./tool-evidence-guard";
+export type { BrokerRetirementDiagnostics } from "./turn-broker-protocol";
 import { existsSync, lstatSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { Server } from "node:net";
@@ -8,6 +11,7 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { dispatchTurnBrokerRequest } from "./turn-broker-dispatch";
 import { startTurnBrokerServer } from "./turn-broker-server";
 import type { TurnBrokerOwner } from "./turn-broker-owner";
+import { setTurnObserverConnected } from "./turn-broker-observer";
 import {
   environmentIdentity,
   notifyCompactionDelivery,
@@ -15,7 +19,7 @@ import {
   type ToolWaiter,
   type TurnChannel,
 } from "./turn-broker-state";
-import { opaqueId, type BrokerToolRequest, type BrokerToolResult, type BrokerTurnOutputEvent } from "./turn-broker-protocol";
+import { opaqueId, type BrokerToolRequest, type BrokerToolResult, type BrokerTurnOutputEvent, type BrokerOutputCapability } from "./turn-broker-protocol";
 import { TurnContextStore } from "./turn-context-store";
 import { beginTurnCompletionFence, commitTurnCompletionFence } from "./turn-broker-completion";
 import { publishPendingFinalizationOutput, rejectTurnOutputWaiters, resetTurnOutput, sealTurnOutput, waitForTurnOutput } from "./turn-broker-output";
@@ -41,6 +45,34 @@ export type { BrokerToolRequest, BrokerToolResult } from "./turn-broker-protocol
 
 const brokers = new Map<string, TurnBroker>();
 const MAX_RETIRED_TURN_HANDLES = 64;
+const MAX_PENDING_CALL_DIAGNOSTICS = 16;
+
+function retirementDiagnostics(channel: TurnChannel): BrokerRetirementDiagnostics {
+  const now = performance.now();
+  const pendingCalls: BrokerRetirementDiagnostics["pendingCalls"] = [];
+  for (const [callId, invocation] of channel.invocations) {
+    if (pendingCalls.length === MAX_PENDING_CALL_DIAGNOSTICS) break;
+    pendingCalls.push({
+      callRef: callId.slice(0, 17),
+      tool: invocation.request.wireName,
+      state: invocation.deliveredAt === undefined ? "queued" : "delivered",
+      queuedMs: Math.max(0, Math.floor((invocation.deliveredAt ?? now) - invocation.queuedAt)),
+      ...(invocation.deliveredAt === undefined ? {} : {
+        awaitingResultMs: Math.max(0, Math.floor(now - invocation.deliveredAt)),
+      }),
+    });
+  }
+  return {
+    traceId: channel.traceId,
+    pendingTools: channel.invocations.size,
+    queuedTools: channel.queuedCallIds.length,
+    deliveredTools: channel.deliveredCallIds.size,
+    activeMcpRequests: channel.activities.size,
+    completionCommitted: channel.completionCommitted,
+    pendingCalls,
+    omittedPendingCalls: channel.invocations.size - pendingCalls.length,
+  };
+}
 
 export async function closeTurnBrokers(): Promise<void> {
   const active = [...brokers.values()];
@@ -70,7 +102,9 @@ export class TurnBroker implements TurnBrokerOwner {
   // The Codex context replayed into ChatGPT still carries the handles of finished turns, so a model
   // can present one. Remembering which turn retired a handle is what separates "you are holding a
   // previous turn's handle" from "this handle never existed".
-  private readonly retiredBindings = new Map<string, string>();
+  // Keep content-free diagnostics with the existing bounded history so an expiry immediately
+  // before timeout cleanup cannot erase the last observed delivery state.
+  private readonly retiredBindings = new Map<string, BrokerRetirementDiagnostics>();
   private readonly retiredTokens = new Map<string, string>();
   private acceptingExternalOwners = true;
   private server?: Server;
@@ -94,7 +128,7 @@ export class TurnBroker implements TurnBrokerOwner {
     ttlMs?: number,
     traceId = "unknown",
     onProgress?: () => void,
-    outputEnabled = false,
+    outputEnabled: BrokerOutputCapability = false,
     externalOwner = false,
     handlePrefix = "turn",
   ): Promise<string> {
@@ -110,7 +144,8 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel: TurnChannel = {
       traceId,
       externalOwner,
-      outputEnabled,
+      outputEnabled: outputEnabled !== false,
+      predictionEnabled: typeof outputEnabled === "object" && outputEnabled.predictions === true,
       ...(onProgress ? { onProgress } : {}),
       environment: {
         ...environment,
@@ -168,7 +203,7 @@ export class TurnBroker implements TurnBrokerOwner {
 
   async beginCompactionTransaction(
     traceId: string,
-    ttlMs: number | null = 120_000,
+    ttlMs = 120_000,
   ): Promise<CompactionTransactionHandle> {
     await this.start();
     return this.compactionTransactions.begin(traceId, ttlMs);
@@ -176,7 +211,7 @@ export class TurnBroker implements TurnBrokerOwner {
 
   async beginRecoveryCheckpoint(
     traceId: string,
-    ttlMs: number | null,
+    ttlMs: number,
     persist: (summary: string) => void,
   ): Promise<CompactionTransactionHandle> {
     await this.start();
@@ -191,7 +226,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.compactionTransactions.abort(token);
   }
 
-  refreshCompactionTransaction(token: string, ttlMs: number | null): void {
+  refreshCompactionTransaction(token: string, ttlMs: number): void {
     this.compactionTransactions.refresh(token, ttlMs);
   }
 
@@ -262,6 +297,15 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (!channel.deliveredCallIds.delete(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
+    if (channel.outputEnabled && result.isError === true) {
+      (channel.toolEvidence ??= new ChatGptToolEvidenceGuard()).observeToolResult({
+        role: "toolResult", toolCallId: callId, toolName: invocation.request.wireName,
+        timestamp: Date.now(), isError: true,
+        content: result.content.flatMap(part => part && typeof part === "object"
+          && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string"
+          ? [part.text] : []).join("\n"),
+      });
+    }
     const receipt = nativeToolResultReceipt(invocation.request, result);
     const { call_id, ...logReceipt } = receipt;
     logNativeWorkflow(channel.traceId, { phase: "tool_result_returned", ...logReceipt,
@@ -271,6 +315,12 @@ export class TurnBroker implements TurnBrokerOwner {
       ...(result._meta && typeof result._meta === "object" && !Array.isArray(result._meta) ? result._meta : {}),
       codex_native_result: receipt,
     } } : result);
+  }
+
+  setObserverConnected(token: string, connected: boolean): boolean {
+    this.prune();
+    const channel = this.channels.get(token);
+    return channel ? setTurnObserverConnected(channel, connected) : false;
   }
 
   beginCompletionFence(token: string): number | undefined {
@@ -298,7 +348,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (channel.activityRevision !== expectedActivityRevision) return false;
+    if (channel.observerPause || channel.activityRevision !== expectedActivityRevision) return false;
     if (!channel.outputEnabled || channel.completionCommitted || channel.outputFinalSequence !== undefined) return false;
     if (channel.invocations.size > 0 || channel.queuedCallIds.length > 0 || channel.activities.size > 0) return false;
     if (channel.finalizationOnly) return true;
@@ -366,6 +416,7 @@ export class TurnBroker implements TurnBrokerOwner {
       if (!invocation) continue;
       channel.invocations.delete(callId);
       channel.compactionDeliveryCount += 1;
+      channel.onProgress?.();
       invocation.resolve(structuredClone(queuedResult));
     }
     if (queued.length > 0) notifyCompactionDelivery(channel);
@@ -464,20 +515,19 @@ export class TurnBroker implements TurnBrokerOwner {
   revoke(token: string, reason = new Error("Codex turn binding was revoked"), failure?: BrokerRetirementFailure): void {
     const channel = this.channels.get(token);
     if (!channel) return;
+    const diagnostics = retirementDiagnostics(channel);
     console.info(`[chatgpt-web] broker_retired ${JSON.stringify({
-      traceId: channel.traceId,
-      pendingTools: channel.invocations.size,
-      queuedTools: channel.queuedCallIds.length,
-      deliveredTools: channel.deliveredCallIds.size,
-      activeMcpRequests: channel.activities.size,
-      completionCommitted: channel.completionCommitted,
+      ...diagnostics,
       ...(failure ? { failure } : {}),
     })}`);
     this.channels.delete(token);
+    const paused = channel.observerPause;
+    channel.observerPause = undefined;
+    paused?.resume();
     this.pending.delete(token);
     if (channel.bindingId) {
       this.bindings.delete(channel.bindingId);
-      this.retire(this.retiredBindings, channel.bindingId, channel.traceId);
+      this.retire(this.retiredBindings, channel.bindingId, diagnostics);
     }
     revokeSafeTurn(channel, reason);
     this.retire(this.retiredTokens, token, channel.traceId);
@@ -511,9 +561,9 @@ export class TurnBroker implements TurnBrokerOwner {
     this.acceptingExternalOwners = accepted;
   }
 
-  private retire(history: Map<string, string>, handle: string, traceId: string): void {
+  private retire<T>(history: Map<string, T>, handle: string, value: T): void {
     history.delete(handle);
-    history.set(handle, traceId);
+    history.set(handle, value);
     while (history.size > MAX_RETIRED_TURN_HANDLES) {
       const oldest = history.keys().next();
       if (oldest.done) return;
@@ -547,7 +597,7 @@ export class TurnBroker implements TurnBrokerOwner {
 
   private start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
-    this.startPromise = startTurnBrokerServer(this.socketPath, (request, signal) => {
+    const attempt = startTurnBrokerServer(this.socketPath, (request, signal) => {
       this.prune();
       return dispatchTurnBrokerRequest(request, signal, {
         acceptingExternalOwners: () => this.acceptingExternalOwners,
@@ -574,7 +624,12 @@ export class TurnBroker implements TurnBrokerOwner {
           this.socketIdentity = { dev, ino };
         }
       });
-    return this.startPromise;
+    this.startPromise = attempt;
+    // A previous owner can release the endpoint after startup failed; allow the next turn to retry.
+    void attempt.catch(() => {
+      if (this.startPromise === attempt) this.startPromise = undefined;
+    });
+    return attempt;
   }
 
   private prune(): void {

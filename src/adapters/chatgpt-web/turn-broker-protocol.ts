@@ -33,18 +33,23 @@ export interface BrokerToolResult {
 }
 
 export type BrokerTurnOutputKind = "commentary" | "reasoning" | "final";
+export type BrokerOutputCapability = boolean | { predictions: true };
 
 export interface BrokerTurnOutputEvent {
   sequence: number;
   kind: BrokerTurnOutputKind;
   text: string;
+  nextMessagePrediction?: string | null;
 }
+
+export type BrokerOutputReceipt = { accepted: true; sequence: number; duplicate: boolean }
+  | { accepted: false; reason: "steering"; instruction: string };
 
 export interface BrokerRequest {
   failure?: BrokerRetirementFailure;
   id: string;
   method: "claim" | "resolve" | "release" | "invoke" | "read_context" | "submit_compaction_handoff" | "submit_recovery_checkpoint" | "submit_output"
-    | "owner_status" | "owner_register" | "owner_register_safe" | "owner_update" | "owner_safe_sent"
+    | "owner_status" | "owner_register" | "owner_register_safe" | "owner_update" | "owner_safe_sent" | "owner_observer_connected"
     | "owner_next" | "owner_complete" | "owner_safe_wait_start" | "owner_safe_wait_completion"
     | "owner_request_compaction" | "owner_compaction_delivery_count" | "safe_start" | "safe_complete"
     | "owner_completion_fence_begin" | "owner_completion_fence_commit" | "owner_next_output"
@@ -58,6 +63,7 @@ export interface BrokerRequest {
   waitMs?: number;
   waitId?: string;
   token?: string;
+  observerConnected?: boolean;
   bindingId?: string;
   wireName?: string;
   freeform?: boolean;
@@ -81,11 +87,12 @@ export interface BrokerRequest {
   outputKind?: BrokerTurnOutputKind;
   outputText?: string;
   outputEnabled?: boolean;
+  predictionEnabled?: boolean;
+  nextMessagePrediction?: string | null;
   afterSequence?: number;
   expectedRevision?: number;
   outputSequence?: number;
   contract?: "native" | "safe";
-  revokeReason?: string;
 }
 
 export interface BrokerResponse {
@@ -102,4 +109,21 @@ export function opaqueId(prefix: string): string {
 
 export function errorOf(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+export interface BrokerRetirementDiagnostics {
+  traceId: string;
+  pendingTools: number;
+  queuedTools: number;
+  deliveredTools: number;
+  activeMcpRequests: number;
+  completionCommitted: boolean;
+  pendingCalls: Array<{
+    callRef: string;
+    tool: string;
+    state: "queued" | "delivered";
+    queuedMs: number;
+    awaitingResultMs?: number;
+  }>;
+  omittedPendingCalls: number;
 }

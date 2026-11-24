@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { AppConfig, SubagentProtocol } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
@@ -57,9 +57,15 @@ export interface InstalledCodexInterruptHook {
   stateKey: string;
   trustedHash: string;
   fragment: string;
+  enabled?: boolean;
 }
 
-export interface CodexIntegrationJournal {
+interface RouteRecoveryState {
+  /** Present only when the launcher disconnected an active route after runtime failure. */
+  reconnectOnStartup?: true;
+}
+
+export interface CodexIntegrationJournal extends RouteRecoveryState {
   version: 10;
   webProvider?: import("./codex-web-provider").WebProviderState;
   active: boolean;
@@ -82,7 +88,7 @@ export interface CodexIntegrationJournal {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV9 {
+export interface LegacyCodexIntegrationJournalV9 extends RouteRecoveryState {
   version: 9;
   active: boolean;
   configPath: string;
@@ -103,7 +109,7 @@ export interface LegacyCodexIntegrationJournalV9 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV8 {
+export interface LegacyCodexIntegrationJournalV8 extends RouteRecoveryState {
   version: 8;
   active: boolean;
   configPath: string;
@@ -122,7 +128,7 @@ export interface LegacyCodexIntegrationJournalV8 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV7 {
+export interface LegacyCodexIntegrationJournalV7 extends RouteRecoveryState {
   version: 7;
   active: boolean;
   configPath: string;
@@ -136,7 +142,7 @@ export interface LegacyCodexIntegrationJournalV7 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV6 {
+export interface LegacyCodexIntegrationJournalV6 extends RouteRecoveryState {
   version: 6;
   active: boolean;
   configPath: string;
@@ -156,7 +162,7 @@ export interface LegacyCodexIntegrationJournalV6 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV5 {
+export interface LegacyCodexIntegrationJournalV5 extends RouteRecoveryState {
   version: 5;
   active: boolean;
   configPath: string;
@@ -174,7 +180,7 @@ export interface LegacyCodexIntegrationJournalV5 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV4 {
+export interface LegacyCodexIntegrationJournalV4 extends RouteRecoveryState {
   version: 4;
   active: boolean;
   configPath: string;
@@ -188,7 +194,7 @@ export interface LegacyCodexIntegrationJournalV4 {
   };
 }
 
-export interface LegacyCodexIntegrationJournalV3 {
+export interface LegacyCodexIntegrationJournalV3 extends RouteRecoveryState {
   version: 3;
   configPath: string;
   installed: {
@@ -239,6 +245,7 @@ export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
   providerMode?: "mixed" | "web-only";
   catalogPath?: string;
+  preserveDisconnectedRoute?: boolean;
 }
 
 export interface UninstallCodexIntegrationResult {
@@ -257,6 +264,33 @@ export interface CodexModelContextOverride {
 export function getCodexHome(): string {
   const configured = process.env.CODEX_HOME?.trim();
   return resolve(expandUserPath(configured || join(homedir(), ".codex")));
+}
+
+/** Explicit operator trust only; request paths can never register a Codex home. */
+export function getTrustedCodexHomes(primary = getCodexHome(), additional?: readonly string[]): string[] {
+  let registered: unknown = additional;
+  if (registered === undefined) {
+    const raw = process.env.CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES?.trim();
+    if (!raw) return [primary];
+    if (raw.length > 4096) throw new Error("Trusted Codex homes configuration is too large");
+    try { registered = JSON.parse(raw); }
+    catch { throw new Error("CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES must be a JSON array of absolute directories"); }
+  }
+  if (!Array.isArray(registered) || registered.length > 7
+    || registered.some(path => typeof path !== "string" || !isAbsolute(path) || /^(?:\\\\|\/\/)/.test(path))) {
+    throw new Error("Trusted Codex homes must contain at most seven additional absolute local directories");
+  }
+  if (registered.length === 0) return [primary];
+  const homes = new Map<string, string>();
+  for (const configured of [primary, ...registered]) {
+    if (!isAbsolute(configured) || !existsSync(configured) || !lstatSync(configured).isDirectory()) {
+      throw new Error("A trusted Codex home is not an existing directory");
+    }
+    const path = realpathSync(configured);
+    const identity = process.platform === "win32" ? path.toLowerCase() : path;
+    homes.set(identity, path);
+  }
+  return [...homes.values()];
 }
 
 export function getCodexConfigPath(): string {

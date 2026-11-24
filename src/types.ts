@@ -5,6 +5,8 @@ export interface CodexParsedRequest {
   stream: boolean;
   options: CodexRequestOptions;
   _rawBody?: unknown;
+  /** Same-final auxiliary result; never emitted as answer text or serialized into context. */
+  _composerPrediction?: { enabled: true; suggestion?: string | null; completedAt?: number };
   /** Set only by the trusted Web route, never parsed from caller-supplied model metadata. */
   _chatgptModelFamily?: "5.6" | "6";
   /** Internal-only fresh surface that may synthesize a final answer but cannot call tools. */
@@ -278,7 +280,7 @@ export interface CodexProviderConfig {
   modelDefaultReasoningEfforts?: Record<string, string>;
   noReasoningModels?: string[];
   chatgptWeb?: {
-    /** ChatGPT custom connector attached to tool-capable temporary chats. */
+    /** ChatGPT custom connector attached to tool-capable chats. */
     appName?: string;
     /** Whether ChatGPT DOM interaction is automatic or explicitly driven by the user. */
     browserInteractionMode?: "automatic" | "manual";
@@ -318,6 +320,7 @@ export interface CodexProviderConfig {
     automaticWebSessionLimitMinutes?: number;
     /** Experimental no-context mode disables compaction and scales browser waits for its full prompt. */
     experimentalNoAutoCompact?: boolean;
+    experimentalPlusNativeContext?: boolean;
     /** Legacy compatibility setting; all composer insertion now uses literal plain paste. */
     experimentalComposerPlainText?: boolean;
     /** Keep the single controlled browser visible. */
@@ -340,7 +343,7 @@ export interface CodexProviderConfig {
     experimentalSkillAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;
-    /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
+    /** Ordinary saved task chats are opt-in; Temporary Chat is the default. */
     useSavedChats?: boolean;
   };
 }

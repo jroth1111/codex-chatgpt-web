@@ -1,6 +1,7 @@
 import type { BrokerTurnOutputEvent, BrokerTurnOutputKind } from "./turn-broker-protocol";
 import type { TurnChannel, TurnOutputWaiter } from "./turn-broker-state";
 import { logNativeWorkflow } from "./native-observability";
+import { ChatGptToolEvidenceGuard } from "./tool-evidence-guard";
 
 const MAX_OUTPUT_EVENT_CHARS = 1_000_000;
 const MAX_OUTPUT_TOTAL_CHARS = 5_000_000;
@@ -10,37 +11,52 @@ export function submitTurnOutput(
   channel: TurnChannel,
   kind: BrokerTurnOutputKind,
   text: string,
-): { event: BrokerTurnOutputEvent; duplicate: boolean } {
+  nextMessagePrediction?: string | null,
+): { event: BrokerTurnOutputEvent; duplicate: boolean } | { steering: string } {
   assertOutputEnabled(channel);
+  if (nextMessagePrediction !== undefined) {
+    if (kind !== "final") throw new Error("Codex Native prediction is only valid on final output");
+    if (!channel.predictionEnabled) throw new Error("Codex Native prediction is not enabled for this turn");
+    if (nextMessagePrediction !== null && (typeof nextMessagePrediction !== "string"
+      || nextMessagePrediction.length > 2_000)) throw new Error("Codex Native prediction is invalid");
+  }
   if (!isOutputKind(kind)) throw new Error("Codex Native output kind is invalid");
   if (!text || (kind === "final" && !text.trim()) || text.length > MAX_OUTPUT_EVENT_CHARS) {
     throw new Error("Codex Native output text is invalid");
   }
   if (channel.safe) throw new Error("Zero Risk requests use the safe completion contract");
   if (channel.outputSealed) throw new Error("Codex Native output arrived after DOM fallback was sealed");
+  if (kind === "final" && channel.steeringInstruction) {
+    const instruction = channel.steeringInstruction;
+    channel.steeringInstruction = undefined;
+    channel.activityRevision++;
+    return { steering: instruction };
+  }
   if (channel.finalizationOnly && !channel.finalizationOutputArmed) {
     if (kind !== "final") {
       throw new Error("Codex Native non-final output arrived while browser recovery submission was pending");
     }
     const pending = channel.finalizationPendingOutput;
     if (pending) {
-      if (pending.text === text) return { event: pending, duplicate: true };
+      if (pending.text === text && pending.nextMessagePrediction === nextMessagePrediction) return { event: pending, duplicate: true };
       throw new Error("Codex Native output submitted conflicting final answers");
     }
     if (channel.completionCommitted || channel.activities.size > 0 || channel.invocations.size > 0) {
       throw new Error("Codex Native final output cannot be accepted while work tools are still active");
     }
     if (channel.outputEvents.length >= MAX_OUTPUT_EVENTS
-      || channel.outputChars + text.length > MAX_OUTPUT_TOTAL_CHARS) {
+      || channel.outputChars + text.length + (nextMessagePrediction?.length ?? 0) > MAX_OUTPUT_TOTAL_CHARS) {
       throw new Error("Codex Native output exceeds the per-turn limit");
     }
-    const event = { sequence: channel.outputEvents.length + 1, kind, text } satisfies BrokerTurnOutputEvent;
+    (channel.toolEvidence ??= new ChatGptToolEvidenceGuard()).assertSupportedOutput(text);
+    const event = { sequence: channel.outputEvents.length + 1, kind, text,
+      ...(nextMessagePrediction === undefined ? {} : { nextMessagePrediction }) } satisfies BrokerTurnOutputEvent;
     channel.finalizationPendingOutput = event;
     return { event, duplicate: false };
   }
   if (channel.outputFinalSequence !== undefined) {
     const final = channel.outputEvents[channel.outputFinalSequence - 1];
-    if (kind === "final" && final?.text === text) return { event: final, duplicate: true };
+    if (kind === "final" && final?.text === text && final.nextMessagePrediction === nextMessagePrediction) return { event: final, duplicate: true };
     throw new Error(kind === "final"
       ? "Codex Native output submitted conflicting final answers"
       : "Codex Native output arrived after the final answer");
@@ -50,10 +66,12 @@ export function submitTurnOutput(
     throw new Error("Codex Native final output cannot be accepted while work tools are still active");
   }
   if (channel.outputEvents.length >= MAX_OUTPUT_EVENTS
-    || channel.outputChars + text.length > MAX_OUTPUT_TOTAL_CHARS) {
+    || channel.outputChars + text.length + (nextMessagePrediction?.length ?? 0) > MAX_OUTPUT_TOTAL_CHARS) {
     throw new Error("Codex Native output exceeds the per-turn limit");
   }
-  const event = { sequence: channel.outputEvents.length + 1, kind, text } satisfies BrokerTurnOutputEvent;
+  if (kind !== "reasoning") (channel.toolEvidence ??= new ChatGptToolEvidenceGuard()).assertSupportedOutput(text);
+  const event = { sequence: channel.outputEvents.length + 1, kind, text,
+    ...(nextMessagePrediction === undefined ? {} : { nextMessagePrediction }) } satisfies BrokerTurnOutputEvent;
   publishTurnOutput(channel, event);
   return { event, duplicate: false };
 }
@@ -70,7 +88,7 @@ function publishTurnOutput(channel: TurnChannel, event: BrokerTurnOutputEvent): 
   channel.outputEvents.push(event);
   logNativeWorkflow(channel.traceId, { phase: "output_queued", kind: event.kind, sequence: event.sequence,
     client_delivery: "not_observed", task_acceptance: "not_established" });
-  channel.outputChars += event.text.length;
+  channel.outputChars += event.text.length + (event.nextMessagePrediction?.length ?? 0);
   if (event.kind === "final") channel.outputFinalSequence = event.sequence;
   channel.activityRevision += 1;
   resolveOutputWaiters(channel, event);
@@ -112,6 +130,7 @@ export function resetTurnOutput(channel: TurnChannel, finalSequence: number): vo
 }
 
 export function sealTurnOutput(channel: TurnChannel, afterSequence: number, expectedRevision: number): boolean {
+  if (channel.observerPause) return false;
   assertOutputEnabled(channel);
   assertSequence(afterSequence, true);
   assertSequence(expectedRevision, true);

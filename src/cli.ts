@@ -122,7 +122,10 @@ async function loginCommand(args: string[]): Promise<void> {
       ...defaultConfig(),
       chromeExecutablePath,
       storageStatePath,
-    }, { continuation: continuation.promise });
+    }, {
+      continuation: continuation.promise,
+      onBrowserReady: () => { stdout.write(`${JSON.stringify({ version: 1, type: "passkey-login-ready" })}\n`); },
+    });
   } finally {
     continuation.close();
   }
@@ -177,6 +180,10 @@ async function setupCommand(args: string[]): Promise<void> {
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
   options.forceLogin = takeFlag(args, "--login");
   options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
+  const predictions = takeFlag(args, "--composer-predictions");
+  const noPredictions = takeFlag(args, "--no-composer-predictions");
+  if (predictions && noPredictions) throw new Error("Choose --composer-predictions or --no-composer-predictions");
+  if (predictions || noPredictions) options.composerPredictionsEnabled = predictions;
   const skillAttachments = takeFlag(args, "--skill-attachments");
   const inlineSkills = takeFlag(args, "--inline-skills");
   if (skillAttachments && inlineSkills) throw new Error("Choose --skill-attachments or --inline-skills");
@@ -188,8 +195,9 @@ async function setupCommand(args: string[]): Promise<void> {
   if (enhancedSession || standardSession) options.useEnhancedWebSessionMode = enhancedSession;
   const savedChats = takeFlag(args, "--saved-chats");
   const temporaryChats = takeFlag(args, "--temporary-chats");
-  if (savedChats && temporaryChats) throw new Error("Choose --saved-chats or --temporary-chats");
-  if (savedChats || temporaryChats) options.useSavedChats = savedChats;
+  const ordinaryChats = takeFlag(args, "--ordinary-chats");
+  if (temporaryChats && (ordinaryChats || savedChats)) throw new Error("Choose --temporary-chats or --saved-chats/--ordinary-chats");
+  if (temporaryChats || ordinaryChats || savedChats) options.useSavedChats = ordinaryChats || savedChats;
   const freshConversation = takeFlag(args, "--fresh-conversation");
   const retainedConversation = takeFlag(args, "--retained-conversation");
   if (freshConversation && retainedConversation) {
@@ -203,11 +211,17 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
   if (skillAttachments || inlineSkills) options.experimentalSkillAttachments = skillAttachments;
+  const plusNativeContext = takeFlag(args, "--plus-native-context");
+  const standardPlusContext = takeFlag(args, "--standard-plus-context");
+  if (plusNativeContext && standardPlusContext) {
+    throw new Error("Choose at most one Plus context mode: --plus-native-context or --standard-plus-context");
+  }
   const noAutoCompact = takeFlag(args, "--no-auto-compact");
   const autoCompact = takeFlag(args, "--auto-compact");
   if (noAutoCompact && autoCompact) {
     throw new Error("Choose at most one compaction mode: --no-auto-compact or --auto-compact");
   }
+  if (plusNativeContext || standardPlusContext) options.experimentalPlusNativeContext = plusNativeContext;
   if (noAutoCompact || autoCompact) options.experimentalNoAutoCompact = noAutoCompact;
   const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
   const zeroRiskDefault = takeFlag(args, "--zero-risk-default");
@@ -216,6 +230,7 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
+  options.preserveDisconnectedRoute = takeFlag(args, "--preserve-disconnected-route");
   options.restartService = takeFlag(args, "--restart-service");
   assertNoArgs(args);
 
@@ -276,6 +291,7 @@ async function doctorCommand(args: string[]): Promise<void> {
 
 async function routeCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
+  const forRuntimeRecovery = action === "disconnect" && takeFlag(args, "--for-runtime-recovery");
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {
@@ -283,14 +299,16 @@ async function routeCommand(args: string[]): Promise<void> {
         return {
           installed: status.installed,
           active: status.active,
+          ...(status.journal && "reconnectOnStartup" in status.journal && status.journal.reconnectOnStartup
+            ? { reconnectOnStartup: true } : {}),
           ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
           errors: status.errors,
         };
       })()
-    : action === "connect"
-      ? activateCodexIntegration()
+    : action === "connect" || action === "recover"
+      ? activateCodexIntegration({ recoveryOnly: action === "recover" })
       : action === "disconnect"
-        ? deactivateCodexIntegration()
+        ? deactivateCodexIntegration({ forRuntimeRecovery })
         : undefined;
   if (!result) throw new Error(`Unknown route action: ${action}`);
   stdout.write(`${JSON.stringify(result, null, 2)}\n`);

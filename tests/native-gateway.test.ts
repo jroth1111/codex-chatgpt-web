@@ -10,10 +10,10 @@ import {
   gatewayToolParameters,
 } from "../src/adapters/chatgpt-web/mcp-gateway";
 
-async function execute(program: string, names: string[], calls: Array<{ name: string; input: unknown }>) {
+async function execute(program: string, names: string[], calls: Array<{ name: string; input: unknown }>, result?: unknown) {
   const tools = Object.fromEntries(names.map(name => [name, async (input: unknown) => {
     calls.push({ name, input });
-    return { content: [{ type: "text", text: name }] };
+    return result ?? { content: [{ type: "text", text: name }] };
   }]));
   const emitted: unknown[] = [];
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
@@ -29,14 +29,41 @@ async function execute(program: string, names: string[], calls: Array<{ name: st
 }
 
 test("nested gateway inventory is paginated and rejects hidden outer tools", async () => {
+  const marker = "codex-tool-catalog:test:";
   const emitted = await execute(gatewayToolCatalogProgram({
-    query: "agent", offset: 0, limit: 20, excludedNames: ["exec"],
+    query: "agent", offset: 0, limit: 20, excludedNames: ["exec"], marker,
   }), ["exec", "multi_agent_v2__wait_agent", "vendor__agent_status"], []);
-  const catalog = gatewayToolCatalogPage({ content: emitted }, new Set(["exec"]));
+  const catalog = gatewayToolCatalogPage({ content: emitted }, new Set(["exec"]), marker);
   expect(catalog.total).toBe(2);
   expect(catalog.tools.map(tool => tool.name)).toEqual([
     "multi_agent_v2__wait_agent", "vendor__agent_status",
   ]);
+});
+
+test("nested gateway preserves structured-only MCP errors without exposing private metadata", async () => {
+  const marker = "codex-tool-result:test:";
+  const emitted = await execute(execGatewayProgram("vendor__status", false, { arguments: {} }, [], marker),
+    ["vendor__status"], [], {
+      content: [], structuredContent: { operation_status: "pending", wait_id: "wait_test" },
+      isError: true, _meta: { credential: "private-client-metadata" },
+    });
+  const record = emitted.map(item => (item as { text?: string }).text)
+    .find(text => text?.startsWith(marker));
+  expect(record).toBeDefined();
+  expect(JSON.parse(record!.slice(marker.length))).toEqual({
+    structuredContent: { operation_status: "pending", wait_id: "wait_test" }, isError: true,
+  });
+  expect(JSON.stringify(emitted)).not.toContain("private-client-metadata");
+});
+
+test("nested gateway preserves plain structured wait results through an exec wrapper", async () => {
+  const marker = "codex-tool-result:wait:";
+  const emitted = await execute(execGatewayProgram("vendor__status", false, { arguments: {} }, [], marker),
+    ["vendor__status"], [], { timed_out: true, status: {} });
+  const record = emitted.map(item => (item as { text?: string }).text)
+    .find(text => text?.startsWith(marker));
+  expect(record).toBeDefined();
+  expect(JSON.parse(record!.slice(marker.length))).toEqual({ structuredContent: { timed_out: true, status: {} } });
 });
 
 test("structured nested gateway validates availability and fixed wait polling", async () => {

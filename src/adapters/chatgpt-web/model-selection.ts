@@ -1,8 +1,52 @@
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
+import {
+  type ChatGptEffortActivation,
+  chatGptModelOption,
+  openChatGptModelRows,
+  parseChatGptEffortSliderState,
+  parseChatGptModelAnnouncement,
+  readChatGptModelAnnouncements,
+} from "../../chatgpt-ui/model-picker";
+import { normalizeChatGptModelAnnouncement } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
-type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
+type EffortMenu = ChatGptEffortActivation;
+
+const effortLabels: Record<ChatGptWebAdapterEffort, RegExp> = {
+  low: /^(?:Instant|Instantané|即時)$/i,
+  medium: /^(?:Medium|Moyen|中)$/i,
+  high: /^(?:High|Élevée?|Elevée?|高)$/i,
+  xhigh: /^(?:Extra High|Très élevé|極高)$/i,
+  max: /^(?:Pro|Max)$/i,
+};
+
+function effortPosition(text: string): RegExpExecArray | null {
+  return /\p{P}\s*(\d+)\s+(?:of|sur)\s+(\d+)\p{P}*$/iu.exec(text.trim())
+    ?? /\p{P}\s*第\s*(\d+)\s*[項项]\p{P}\s*共\s*(\d+)\s*[項项]\p{P}*$/iu.exec(text.trim());
+}
+
+function matchesEffortPosition(position: RegExpExecArray, effort: ChatGptWebAdapterEffort): boolean {
+  const index = ["low", "medium", "high", "xhigh", "max"].indexOf(effort) + 1;
+  return Number(position[1]) === index && Number(position[2]) >= index && Number(position[2]) <= 6;
+}
+
+function effortEvidenceMatches(descriptions: readonly string[], effort: ChatGptWebAdapterEffort): boolean {
+  return descriptions.every(text => {
+    const normalized = normalizeChatGptModelAnnouncement(text);
+    const mode = parseChatGptModelAnnouncement(normalized)?.mode ?? normalized.split(/\p{P}/u)[0]!.trim();
+    const recognized = Object.values(effortLabels).some(label => label.test(mode));
+    const position = effortPosition(normalized);
+    return (!recognized || effortLabels[effort].test(mode))
+      && (!position || matchesEffortPosition(position, effort));
+  });
+}
+
+function modelVersionEvidenceMatches(descriptions: readonly string[], family: ChatGptWebModelFamily): boolean {
+  return descriptions.every(text => {
+    const version = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)*)/i.exec(normalizeChatGptModelAnnouncement(text));
+    return !version || version[1] === family;
+  });
+}
 
 function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
@@ -11,13 +55,9 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
   );
 }
 
-function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
-  return menu.menu.getByRole("menuitemradio", {
-    name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
-      // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
-      : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
-    exact: true,
-    includeHidden: true,
+export function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily, effort?: ChatGptWebAdapterEffort) {
+  return chatGptModelOption(menu.menu, {
+    version: family, name: family === "6" && effort === "max" ? "astra" : "sol",
   });
 }
 
@@ -26,25 +66,13 @@ export async function selectChatGptModelFamily(
   menu: EffortMenu,
   family: ChatGptWebModelFamily,
   activate: () => Promise<EffortMenu>,
+  effort?: ChatGptWebAdapterEffort,
 ): Promise<EffortMenu> {
   try {
-    const option = familyOption(menu, family);
+    const option = await familyOption(menu, family, effort);
     if (await option.count() > 1) throw familyError(family);
     if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
-    // The attached radio rows are inert while this composer-owned advanced view is collapsed.
-    const powerView = menu.menu.locator('[data-model-picker-view]');
-    if (await powerView.count() === 1) {
-      const view = await powerView.getAttribute("data-model-picker-view");
-      if (view === "simple") {
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
-        if (await trigger.count() !== 1) throw familyError(family);
-        await trigger.click({ timeout: 5_000 });
-      } else if (view !== "advanced") throw familyError(family);
-    } else {
-      const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
-      if (await powerView.count() !== 0 || await trigger.count() !== 1) throw familyError(family);
-      if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
-    }
+    await openChatGptModelRows(menu.menu);
     await option.waitFor({ state: "visible", timeout: 5_000 });
     await option.click({ timeout: 5_000 });
     // Choosing a family returns the open picker to its slider. Keep that surface:
@@ -53,7 +81,7 @@ export async function selectChatGptModelFamily(
     const selected = await activate();
     const deadline = Date.now() + 1_000;
     do {
-      const current = familyOption(selected, family);
+      const current = await familyOption(selected, family, effort);
       if (await current.count() > 1) throw familyError(family);
       if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -70,17 +98,19 @@ export function chatGptModelFamilyMatches(
   family: ChatGptWebModelFamily,
   effort: ChatGptWebAdapterEffort,
 ): boolean {
-  // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
-  // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
-  const expected = family === "6" && effort !== "max" ? "5.6" : family;
+  // GPT-6 uses Sol below Pro and Astra at Pro. An old Latest picker can still use
+  // 5.6 at lower efforts; that is not proof of an explicitly requested GPT-6 turn.
+  const expectedName = family === "6" && effort === "max" ? "astra" : "sol";
   const states = descriptions.flatMap(text => {
-    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
-      .exec(text.replace(/\s+/g, " ").trim());
-    return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
+    const state = parseChatGptModelAnnouncement(text);
+    return state ? [state] : [];
   });
-  return states.length > 0 && states.every(state => state.version === expected
-    && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
-    && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
+  return modelVersionEvidenceMatches(descriptions, family) && states.length > 0 && states.every(state => state.version === family
+    && (!state.name || state.name === expectedName)
+    && (!/^max$/i.test(state.mode) || family === "6" && effort === "max" && state.name === "astra")
+    && (effortLabels[effort].test(state.mode)
+      || family === "6" && effort === "max" && state.name === "astra" && /^max$/i.test(state.mode)))
+    && effortEvidenceMatches(descriptions, effort);
 }
 
 export async function assertChatGptModelFamily(
@@ -92,16 +122,37 @@ export async function assertChatGptModelFamily(
 ): Promise<void> {
   const deadline = Date.now() + settleMs;
   do {
-    const option = familyOption(menu, family);
+    const option = await familyOption(menu, family, effort);
     const checked = await option.count() === 1 && await option.getAttribute("aria-checked") === "true";
     const state = parseChatGptEffortSliderState(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
       await menu.slider.getAttribute("aria-valuenow"),
     );
     const descriptions = await readChatGptModelAnnouncements(menu.slider);
-    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
+    // The retired Latest picker used 5.6 below Pro. Only its actual radio label authorizes
+    // that compatibility mapping; an explicit 6 picker must prove 6 at every effort.
+    const legacyLatest = family === "6" && checked
+      && /^(?:Latest|Le plus récent|最新(?:模型)?|최신)$/i.test((await option.innerText()).trim());
+    const expectedFamily = legacyLatest && effort !== "max" ? "5.6" : family;
+    if (checked && state && state.value === state.min + effortIndex && modelVersionEvidenceMatches(descriptions, expectedFamily)
+      && (chatGptModelFamilyMatches(descriptions, expectedFamily, effort)
+      || (!legacyLatest && chatGptUnversionedEffortMatches(descriptions, effort)))) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);
   throw familyError(family);
+}
+
+/** Current pickers omit the version in their status. The caller must also verify the family radio,
+ * all version evidence and slider position; an unscoped generic Pro label is never sufficient evidence. */
+export function chatGptUnversionedEffortMatches(descriptions: readonly string[], effort: ChatGptWebAdapterEffort): boolean {
+  const normalized = descriptions.map(normalizeChatGptModelAnnouncement);
+  if (!effortEvidenceMatches(normalized, effort)) return false;
+  if (normalized.some(text => /^(?:GPT[-\s]?)?\d+(?:\.\d+)?\s/i.test(text))) return false;
+  const statuses = normalized.flatMap(text => {
+    const position = effortPosition(text);
+    return position ? [{ label: text.slice(0, position.index).trim(), position }] : [];
+  });
+  return statuses.length === 1 && effortLabels[effort].test(statuses[0]!.label)
+    && matchesEffortPosition(statuses[0]!.position, effort);
 }

@@ -3,10 +3,13 @@ import { activeChatCompletionTurns } from "./chat-completions/runtime";
 import { NativeChatCompletionBridge } from "./chat-completions/native-bridge";
 import { ChatCompletionError } from "./chat-completions/contract";
 import { chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 import { DEFAULT_CHATGPT_AUTOMATIC_WEB_SESSION_LIMIT, chatGptAccountSafety } from "./adapters/chatgpt-web/account-safety";
 import { closeChatGptBrowserWorkers, discardChatGptStartupPages } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { chatGptTurnExecutionKey, chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
+import { chatGptModelFailureKey } from "./adapters/chatgpt-web/turn-retry-identity";
+import { chatGptWebTurnRetryPolicy } from "./adapters/chatgpt-web/retry-policy";
 import { ChatGptThreadEnvironmentStore } from "./adapters/chatgpt-web/thread-environment";
 import { handleClaudeSteeringHook } from "./messages/steering-hook";
 import { handleTurnCancellation } from "./server-turn-cancellation";
@@ -15,8 +18,10 @@ import {
   extractChatGptTurnUserRevision,
   extractChatGptTurnIdentity,
   extractCodexTurnIdentityFromBody,
+  isCodexComposerPrediction,
 } from "./adapters/chatgpt-web/environment";
 import { rememberCompletedCompaction } from "./responses/compaction-continuation";
+import { composerPredictionEnabled, composerPredictionResponse, rememberComposerPrediction } from "./composer-predictions";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -34,7 +39,7 @@ import {
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 import { forwardNativeCodexRequest } from "./native-passthrough";
-import { modelCatalogFailure, modelsRequest, nativeAuxiliaryEndpoint, nativeAuxiliaryRequest, nativeSearchRequest, type ModelCatalogFailure } from "./native-routes";
+import { ModelCatalogFetches, modelCatalogFailure, modelsRequest, nativeAuxiliaryEndpoint, nativeAuxiliaryRequest, nativeSearchRequest, type ModelCatalogFailure } from "./native-routes";
 import { COMPACT_PROMPT } from "./responses/compaction";
 import { handleCompactRequest } from "./responses/compact-handler";
 import { parseRequest } from "./responses/parser";
@@ -49,7 +54,7 @@ import { enforceLocalDataRequestSecurity } from "./local-request-security";
 import { lifecycleControlAuthorized } from "./lifecycle-control";
 import type { ChatGptWebAdapterFactory, ResponseRequestOptions, ServerDependencies } from "./server-dependencies";
 
-export { HttpTurnCounter, modelsRequest, nativeSearchRequest };
+export { ModelCatalogFetches, HttpTurnCounter, modelsRequest, nativeSearchRequest };
 export type { ResponseRequestOptions } from "./server-dependencies";
 
 export function nativeChatToolCallsLive(session: {
@@ -120,7 +125,7 @@ export async function responseRequest(
   // shortcut cannot make an unknown or unavailable model look enabled, then
   // handle the exact title contract before lifecycle identity registration,
   // adapter, broker, or browser work.
-  if (typeof requestedModel === "string" && isChatGptWebModelSlug(requestedModel)) {
+  if (typeof requestedModel === "string" && isChatGptWebModelSlug(requestedModel) && !isCodexComposerPrediction(raw)) {
     try {
       requireChatGptWebModelRoute(requestedModel, config);
     } catch (error) {
@@ -128,6 +133,10 @@ export async function responseRequest(
     }
     const titleAuxiliary = codexTitleAuxiliaryResponse(raw);
     if (titleAuxiliary) return titleAuxiliary;
+  }
+  if (typeof requestedModel === "string" && isChatGptWebModelSlug(requestedModel) && isCodexComposerPrediction(raw)) {
+    return composerPredictionResponse(expandPreviousResponseInput(raw) as Record<string, unknown>, config,
+      chatGptWebExecutionNamespace(providerConfig(config)));
   }
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
@@ -148,6 +157,7 @@ export async function responseRequest(
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
   const expanded = expandPreviousResponseInput(raw);
+  const executionConfig = config;
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
   try {
@@ -155,7 +165,7 @@ export async function responseRequest(
     parsed._canonicalContextComplete = typeof requestedPreviousResponseId !== "string"
       || expanded !== raw
       || parsed._contextCompactionBoundary === true;
-    route = routeChatGptWebRequest(parsed, config);
+    route = routeChatGptWebRequest(parsed, executionConfig);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
       options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
@@ -185,9 +195,11 @@ export async function responseRequest(
   }
 
   const compaction = parsed._compactionRequest === true;
+  if (!compaction && !parsed._localCompactionRequest && composerPredictionEnabled(config)) parsed._composerPrediction = { enabled: true };
   const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
   const rememberCompletedResponse = (response: Record<string, unknown>): void => {
     if (!compaction) {
+      rememberComposerPrediction(parsed, response, chatGptWebExecutionNamespace(providerConfig(config)));
       if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
       return;
     }
@@ -200,7 +212,7 @@ export async function responseRequest(
       "Compaction is disabled for routed ChatGPT Web models by the experimental no-auto-compact setting.",
     );
   }
-  if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+  if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
     return formatErrorResponse(
       409,
       "invalid_request_error",
@@ -217,11 +229,13 @@ export async function responseRequest(
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
-  const provider = providerConfig(config);
+  const provider = providerConfig(executionConfig);
   let traceId: string | undefined;
+  let modelRejectionKey: string | undefined;
   try {
     traceId = chatGptWebTraceId(provider, parsed);
     if (!compaction) extractChatGptTurnUserRevision(parsed);
+    modelRejectionKey = `${chatGptWebExecutionNamespace(provider)}:model:${chatGptModelFailureKey(parsed)}`;
   } catch (error) {
     // A cancelled browser session can only exist after the adapter accepted canonical native
     // turn identity and user-revision metadata. Requests without that identity have no matching
@@ -254,6 +268,14 @@ export async function responseRequest(
       headers: { "content-type": "application/json" },
     });
   }
+  if (modelRejectionKey) {
+    const rejected = chatGptWebTurnRetryPolicy.terminalFailure(modelRejectionKey);
+    // Codex ignores retryable=false on unknown SSE errors, including exhausted final recovery.
+    // The receipt makes the same rejected revision HTTP 400 without another browser send.
+    if (rejected) return Response.json({ error: {
+      type: rejected.errorType, code: rejected.code, message: rejected.message,
+    }, retryable: false }, { status: 400 });
+  }
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
@@ -266,7 +288,11 @@ export async function responseRequest(
         queue.push(event);
       });
     } catch (error) {
-      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error) };
+      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof ChatGptWebAdapterError ? {
+          status: error.status, errorType: error.errorType, code: error.code, retryable: error.retryable,
+        } : {}),
+      };
       options.onAdapterEvent?.(event);
       queue.push(event);
     } finally {
@@ -372,6 +398,7 @@ export function startServer(
   } | null = null;
   const httpTurns = new HttpTurnCounter();
   const accountSafety = chatGptAccountSafety();
+  const modelCatalogFetches = dependencies.modelCatalogFetches ?? new ModelCatalogFetches();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0) + activeChatCompletionTurns(),
@@ -390,7 +417,7 @@ export function startServer(
         return httpTurns.track(signal => chatCompletionRequest(req, config, signal, dependencies.chatCompletionExecutor,
           nativeChatBridge), req.signal, process.platform, "/v1/chat/completions");
       }
-      const securityRejection = enforceLocalDataRequestSecurity(req, url.pathname, server.port!); if (securityRejection) return securityRejection;
+      const securityRejection = enforceLocalDataRequestSecurity(req, url.pathname); if (securityRejection) return securityRejection;
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
@@ -516,7 +543,7 @@ export function startServer(
         if (draining) {
           return formatErrorResponse(
             503,
-            "server_error",
+            "service_draining",
             "codex-chatgpt-web is draining for a requested service operation",
           );
         }
@@ -525,6 +552,9 @@ export function startServer(
           const request = ++modelCatalogRequests;
           const started = Date.now();
           const recordResult = (response: Response, failure?: ModelCatalogFailure): Response => {
+            // A disconnected Codex client did not test the catalog. Preserve the
+            // last completed result; only actual failures belong in launcher health.
+            if (req.signal.aborted) return response;
             const result = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
             if (!lastModelCatalogResult || request > lastModelCatalogResult.request) lastModelCatalogResult = result;
             if (!response.ok) console.warn(`[codex-chatgpt-web] model_catalog_failed ${JSON.stringify({ ...result, elapsedMs: Date.now() - started })}`);
@@ -550,8 +580,10 @@ export function startServer(
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
             value => { failure = value; },
+            req.signal,
+            modelCatalogFetches,
           );
-          if (response.ok) {
+          if (response.ok && !req.signal.aborted) {
             successfulModelCatalogRequests += 1;
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
           }
@@ -566,7 +598,7 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (nativeReadinessInProgress) return formatErrorResponse(409, "server_error", "native_readiness_busy: no inference started");
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "service_draining", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
@@ -581,7 +613,7 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/messages") {
         if (nativeReadinessInProgress) return formatErrorResponse(409, "server_error", "native_readiness_busy: no inference started");
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "service_draining", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           signal => messagesRequest(new Request(req, { signal }), config, dependencies.adapterFactory),
           req.signal,
@@ -595,7 +627,7 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (nativeReadinessInProgress) return formatErrorResponse(409, "server_error", "native_readiness_busy: no inference started");
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "service_draining", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
@@ -610,7 +642,7 @@ export function startServer(
       }
       const nativeAuxiliary = req.method === "POST" ? nativeAuxiliaryEndpoint(url.pathname) : undefined;
       if (nativeAuxiliary) {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "service_draining", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           signal => nativeAuxiliaryRequest(new Request(req, { signal }), nativeAuxiliary, dependencies.fetchUpstream),
           req.signal,
@@ -625,6 +657,7 @@ export function startServer(
     if (shutdownPromise) return;
     draining = true;
     chatGptTurnSessions.clear();
+    modelCatalogFetches.close();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([

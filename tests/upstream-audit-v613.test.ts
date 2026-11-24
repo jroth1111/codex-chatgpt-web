@@ -43,7 +43,7 @@ const ledger = JSON.parse(readFileSync(
 };
 
 function git(args: string[], cwd = root): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
@@ -85,6 +85,34 @@ function evidenceDigest(path: string, content: Buffer): string {
   }
   return createHash("sha256").update(bytes).digest("hex");
 }
+
+function upstreamAuditCases(text: string, path: string, includeDom = true, includeOptions = false) {
+  const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+  const found: Array<{name: string; sha256: string}> = [];
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && (includeDom ? /^(test|it|domTest)(\.|\(|$)/ : /^(test|it)(\.|\(|$)/).test(node.expression.getText(source))
+      && node.arguments.slice(1, includeOptions ? 3 : 2).some(arg => ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))) {
+      const name = node.arguments[0]!;
+      const sha256 = createHash("sha256").update(node.getText(source).replaceAll("\r\n", "\n")).digest("hex");
+      if (ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) {
+        found.push({name: name.text, sha256});
+      } else if (ts.isTemplateExpression(name) || ts.isBinaryExpression(name)) {
+        found.push({name: name.getText(source), sha256});
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return found;
+}
+
+test("audit enumeration preserves node:test options and direct callbacks", () => {
+  const source = 'test("direct", () => { expect(true).toBe(true); });\n'
+    + 'test("options", { skip: false }, async () => { assert.equal(1, 1); });\n';
+  expect(upstreamAuditCases(source, "fixture.test.cjs", true, true).map(item => item.name)).toEqual(["direct", "options"]);
+  expect(upstreamAuditCases(source.replace("assert.equal(1, 1)", "assert.equal(1, 2)"), "fixture.test.cjs", true, true)[1]?.sha256)
+    .not.toBe(upstreamAuditCases(source, "fixture.test.cjs", true, true)[1]?.sha256);
+});
 
 test("v6.1.3 prior ledger digest is independent of checkout line endings", () => {
   const path = ".github/upstream-audit/v6.1.2.json";
@@ -188,17 +216,84 @@ test("v6.1.3 evidence is content-addressed, references v6.1.2, and reconstructs 
   }
 }, 30_000);
 
-test("continuing v6.1.4 evidence closes source anchors and reconstructs the original merge from retained prerequisites", () => {
-  const next = JSON.parse(readFileSync(resolve(root, ".github/upstream-audit/v6.1.4.json"), "utf8"));
+test.each(["v6.1.4", "v6.1.5", "v6.1.7", "v6.1.8", "v6.1.10", "v6.1.11", "v6.1.12", "v6.1.13", "v6.1.15", "v6.1.16", "v6.1.17"])("continuing %s evidence closes source anchors and reconstructs the original merge from retained prerequisites", release => {
+  const next = JSON.parse(readFileSync(resolve(root, `.github/upstream-audit/${release}.json`), "utf8"));
+  if (release === "v6.1.5") {
+    expect(next.coverage).toEqual({paths: 54, hunks: 202, testPaths: 21, testCaseDeltas: 61, pending: 0, missing: 0});
+    expect(next.upstream).toBe("92a356fac2292e3af5a97ab7ba634edd8d38621e");
+    expect(next.tag.object).toBe("38311dfe5c8914b397b6f890e2b21c990dd4a84c");
+  }
+  if (release === "v6.1.7") {
+    expect(next.coverage).toEqual({paths: 75, hunks: 377, testPaths: 31, testCaseDeltas: 127, pending: 0, missing: 0});
+    expect(next.upstream).toBe("f9ad4ae83a579287105ad822dd0c3e0029b04ef6");
+    expect(next.tag.object).toBe("bd6a3021d911cfd6e7dbe2b45b117b5cb365c5c7");
+  }
+  if (release === "v6.1.8") {
+    expect(next.coverage).toEqual({paths: 55, hunks: 155, testPaths: 29, testCaseDeltas: 52, pending: 0, missing: 0});
+    expect(next.baseline).toBe("199e6f63b9e2f69a89b4364b7384a35de4a249e2");
+    expect(next.upstream).toBe("7cc8b8d8aadbbf729bd2bd43ca47fa15ea9965c0");
+    expect(next.tag.object).toBe("09af1a06b2bde862ec41d3ca01b0a7577a14fa56");
+    expect(next.evidence.path).toBe(`.github/upstream-audit/evidence/${next.evidence.sha256}.tar.gz`);
+  }
+  if (release === "v6.1.10") {
+    expect(next.coverage).toEqual({paths: 75, hunks: 235, testPaths: 30, testCaseDeltas: 120, pending: 0, missing: 0});
+    expect(next.baseline).toBe("943d772df3281bec54fc9cffc7c1af36a9cec3f7");
+    expect(next.upstream).toBe("8645a89e6a5fbe011e1bfbb0821a386ca7477ad5");
+    expect(next.tag).toEqual({type: "lightweight", refTarget: next.upstream, object: null, commit: next.upstream, signed: false});
+    expect(next.evidence.path).toBe(`.github/upstream-audit/evidence/${next.evidence.sha256}.tar.gz`);
+  }
+  if (release === "v6.1.15") {
+    expect(next.baseline).toBe("f833c5953604ac07696317904781092b15669fef");
+    expect(next.semanticBaseline).toBe("6f43747eb5585ca623c0617e729826dfd680c5b7");
+    expect(next.upstream).toBe("8a75f1ba391657687beaa870d2adb155363e8931");
+    expect(next.tag).toEqual({ type: "lightweight", refTarget: next.upstream, object: null, commit: next.upstream, signed: false });
+    expect(next.coverage).toEqual({ paths: 115, hunks: 515, testPaths: 47, testCaseDeltas: 190, pending: 0, missing: 0 });
+  }
+  if (release === "v6.1.16") {
+    expect(next.baseline).toBe("cd18f2e7462735c10ebeff185df702b97f3a03da");
+    expect(next.semanticBaseline).toBe("6f43747eb5585ca623c0617e729826dfd680c5b7");
+    expect(next.upstream).toBe("b6182818bb14d108a63cfa548b9c6684d82cfacc");
+    expect(next.tag).toEqual({ type: "annotated", refTarget: "2610a0e44ec4a81392dc2da7d8d5d82ed868c074", object: "2610a0e44ec4a81392dc2da7d8d5d82ed868c074", commit: next.upstream, signed: false });
+  }
+  if (release === "v6.1.17") {
+    expect(next.baseline).toBe("d8139b65c10bd9a7bc12e6cec16162926b6a4c0c");
+    expect(next.semanticBaseline).toBe("6f43747eb5585ca623c0617e729826dfd680c5b7");
+    expect(next.upstream).toBe("860fa576eb47d9e20d7d8289235bfea94392d2fd");
+    expect(next.tag).toEqual({ type: "annotated", refTarget: "b543a9cca1de563d97a4090122ce8695ba145437", object: "b543a9cca1de563d97a4090122ce8695ba145437", commit: next.upstream, signed: false });
+    expect(next.coverage).toEqual({ paths: 118, hunks: 555, testPaths: 50, testCaseDeltas: 226, pending: 0, missing: 0 });
+  }
   const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const publishedObjects = release === "v6.1.7" || release === "v6.1.8" || release === "v6.1.10" || release === "v6.1.11" || release === "v6.1.12" || release === "v6.1.13" || release === "v6.1.15" || release === "v6.1.16" || release === "v6.1.17"
+    ? new Set(git(["rev-list", "--objects", "HEAD"]).split(/\r?\n/).map(line => line.split(" ")[0])) : undefined;
+  const retainedTargets = new Map<string, Buffer>();
+  if (next.evidence.targetBlobs) {
+    const retained = next.evidence.targetBlobs;
+    expect(retained.path).toBe(`.github/upstream-audit/evidence/${retained.sha256}.tar.gz`);
+    const bytes = readFileSync(resolve(root, retained.path));
+    expect(digest(bytes)).toBe(retained.sha256);
+    expect(bytes.length).toBe(retained.bytes);
+    for (const [oid, data] of tarEntries(bytes)) {
+      expect(oid).toMatch(/^[a-f0-9]{40}$/);
+      expect(createHash("sha1").update(`blob ${data.length}\0`).update(data).digest("hex")).toBe(oid);
+      retainedTargets.set(oid, data);
+    }
+    expect([...retainedTargets.keys()].sort()).toEqual([...retained.objects].sort());
+  }
+  const verifiedBlobs = new Map<string, Buffer>();
   const blob = (oid: string) => {
+    const retained = retainedTargets.get(oid);
+    if (retained) return retained;
+    const cached = verifiedBlobs.get(oid);
+    if (cached) return cached;
     const result = spawnSync("git", ["cat-file", "blob", oid], { cwd: root });
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr.toString("utf8")).toBe(0);
+    verifiedBlobs.set(oid, result.stdout);
     return result.stdout;
   };
   const textDigest = (text: string) => digest(Buffer.from(text.replaceAll("\r\n", "\n")));
   expect(next.tag.signed).toBeFalse();
-  expect(git(["rev-parse", `${next.upstream}^`])).toBe(next.semanticBaseline);
+  expect(git(["merge-base", next.semanticBaseline, next.upstream])).toBe(next.semanticBaseline);
+  expect(git(["rev-list", "--count", `${next.semanticBaseline}..${next.upstream}`])).toBe(release === "v6.1.17" ? "50" : release === "v6.1.16" ? "48" : release === "v6.1.15" ? "42" : release === "v6.1.10" ? "14" : release === "v6.1.7" ? "4" : release === "v6.1.8" || release === "v6.1.13" ? "3" : "1");
   const expectedPaths = git(["diff", "--name-only", next.semanticBaseline, next.upstream]).split(/\r?\n/).sort();
   expect(next.paths.map((item: any) => item.path).sort()).toEqual(expectedPaths);
   expect(new Set(next.paths.map((item: any) => item.path)).size).toBe(expectedPaths.length);
@@ -213,28 +308,12 @@ test("continuing v6.1.4 evidence closes source anchors and reconstructs the orig
     expect(next.obligations.some((entry: any) => entry.id === item.obligation), item.id).toBeTrue();
   }
   expect(new Set(next.tests.map((item: any) => item.id)).size).toBe(next.tests.length);
-  const declaredCases = (text: string, path: string) => {
-    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
-    const found: Array<{name: string; sha256: string}> = [];
-    function visit(node: ts.Node) {
-      if (ts.isCallExpression(node) && /^(test|it)(\.|\(|$)/.test(node.expression.getText(source))
-        && node.arguments.length >= 2 && (ts.isArrowFunction(node.arguments[1]!) || ts.isFunctionExpression(node.arguments[1]!))) {
-        const name = node.arguments[0]!;
-        if (ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) {
-          found.push({name: name.text, sha256: textDigest(node.getText(source))});
-        } else if (ts.isTemplateExpression(name) || ts.isBinaryExpression(name)) {
-          found.push({name: name.getText(source), sha256: textDigest(node.getText(source))});
-        }
-      }
-      ts.forEachChild(node, visit);
-    }
-    visit(source);
-    return found;
-  };
+  const declaredCases = (text: string, path: string) => upstreamAuditCases(text, path, release !== "v6.1.4", release === "v6.1.15" || release === "v6.1.16");
   const expectedCases = expectedPaths.filter(path => /(^|\/)(tests?|__tests__)\/|\.test\./.test(path)).flatMap(path => {
     const previous = spawnSync("git", ["show", `${next.semanticBaseline}:${path}`], {cwd: root, encoding: "utf8"});
     const before = previous.status === 0 ? declaredCases(previous.stdout, path) : [];
-    const after = declaredCases(blob(git(["rev-parse", `${next.upstream}:${path}`])).toString("utf8"), path);
+    const current = spawnSync("git", ["show", `${next.upstream}:${path}`], {cwd: root, encoding: "utf8"});
+    const after = current.status === 0 ? declaredCases(current.stdout, path) : [];
     return [
       ...after.filter(item => !before.some(old => old.name === item.name && old.sha256 === item.sha256))
         .map(item => ({path, name: item.name, sha256: item.sha256, status: before.some(old => old.name === item.name) ? "modified" : "added"})),
@@ -247,15 +326,18 @@ test("continuing v6.1.4 evidence closes source anchors and reconstructs the orig
     const source = blob(item.source.blob).toString("utf8").replaceAll("\r\n", "\n");
     expect(textDigest(source.split("\n").slice(item.source.start - 1, item.source.end).join("\n")), item.id).toBe(item.source.lineSha256);
     expect(item.targets.length, item.id).toBeGreaterThan(0);
-    for (const target of item.targets) {
+  }
+  const targets = [...next.tests.flatMap((item: any) => item.targets),
+    ...next.obligations.flatMap((item: any) => item.production ?? []), ...(next.supplementalTests ?? [])];
+  for (const target of targets) {
+      if (publishedObjects) expect(publishedObjects.has(target.blob) || retainedTargets.has(target.blob), target.path).toBeTrue();
       const text = blob(target.blob).toString("utf8").replaceAll("\r\n", "\n");
       expect(textDigest(text.split("\n").slice(target.start - 1, target.end).join("\n")), target.path).toBe(target.lineSha256);
-      if (JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version.startsWith("6.1.4-")) {
-        // Historical source anchors stay immutable. Intentional follow-ups are
-        // exact-byte attestations, never a wildcard or a version-based bypass.
+      if (JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version.startsWith(`${release.slice(1)}-`)) {
+        // Historical source anchors stay immutable; follow-ups attest exact bytes.
         const followups: Array<{path: string; baselineSha256: string; currentSha256: string; reason: string}> =
-          JSON.parse(readFileSync(resolve(root, ".github/upstream-audit/v6.1.4-followups.json"), "utf8"));
-        const matching = followups.filter((entry: any) => entry.path === target.path);
+          JSON.parse(readFileSync(resolve(root, `.github/upstream-audit/${release}-followups.json`), "utf8"));
+        const matching = followups.filter(entry => entry.path === target.path);
         expect(matching.length, target.path).toBeLessThanOrEqual(1);
         const followup = matching[0];
         if (followup) {
@@ -266,7 +348,6 @@ test("continuing v6.1.4 evidence closes source anchors and reconstructs the orig
         expect(textDigest(readFileSync(resolve(root, target.path), "utf8")), target.path)
           .toBe(followup?.currentSha256 ?? textDigest(text));
       }
-    }
   }
   expect(next.tests.length).toBe(next.coverage.testCaseDeltas);
   expect(next.evidence.prior.ledgerDigestCanonicalization).toBe("git-blob-exact-bytes");
@@ -275,6 +356,18 @@ test("continuing v6.1.4 evidence closes source anchors and reconstructs the orig
   const archive = readFileSync(resolve(root, next.evidence.path));
   expect(digest(archive)).toBe(next.evidence.sha256);
   expect(archive.length).toBe(next.evidence.bytes);
+  for (const retained of [next.evidence.corrections, next.evidence.retryCorrection, next.evidence.review].filter(Boolean)) {
+    expect(retained.path).toBe(`.github/upstream-audit/evidence/${retained.sha256}.tar.gz`);
+    const bytes = readFileSync(resolve(root, retained.path));
+    expect(digest(bytes)).toBe(retained.sha256);
+    expect(bytes.length).toBe(retained.bytes);
+    const corrected = tarEntries(bytes);
+    const manifest = JSON.parse(corrected.get("manifest.json")!.toString("utf8"));
+    for (const file of manifest.files) {
+      expect(corrected.get(file.path)?.length, file.path).toBe(file.bytes);
+      expect(digest(corrected.get(file.path)!), file.path).toBe(file.sha256);
+    }
+  }
   const entries = tarEntries(archive);
   const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
   expect(manifest.prerequisites).toEqual([next.baseline, next.upstream]);
@@ -291,8 +384,8 @@ test("continuing v6.1.4 evidence closes source anchors and reconstructs the orig
     writeFileSync(packPath, entries.get("objects/auto-merge-objects.pack")!);
     git(["--git-dir", scratch, "index-pack", packPath]);
     expect(git(["--git-dir", scratch, "cat-file", "-t", next.automaticMergeTree])).toBe("tree");
-    expect(git(["--git-dir", scratch, "rev-parse", `${next.tag.object}^{commit}`])).toBe(next.upstream);
-    expect(git(["--git-dir", scratch, "rev-parse", `${ledger.tag.object}^{commit}`])).toBe(next.semanticBaseline);
+    expect(git(["--git-dir", scratch, "rev-parse", `${next.tag.object ?? next.tag.refTarget}^{commit}`])).toBe(next.upstream);
+    expect(git(["--git-dir", scratch, "rev-parse", `${next.semanticTag.object ?? next.semanticTag.refTarget}^{commit}`])).toBe(next.semanticBaseline);
     const trees = git(["--git-dir", scratch, "rev-list", "--objects", next.automaticMergeTree]).split(/\r?\n/);
     const check = spawnSync("git", ["--git-dir", scratch, "cat-file", "--batch-check"], {
       input: trees.map(line => line.split(" ")[0]).join("\n") + "\n", encoding: "utf8",

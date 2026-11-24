@@ -3,15 +3,15 @@ const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { readFileSync } = require('node:fs');
 const { createHash } = require('node:crypto');
-const vendorPath = require.resolve('../vendor/http-cache-semantics');
+
 const actualPath = createRequire(require.resolve('cacheable-request')).resolve('http-cache-semantics');
 
-test('the real downloader dependency resolves to the reviewed mitigation bytes', () => {
-  const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
-  assert.equal(digest(actualPath), digest(vendorPath));
+test('the actual downloader resolves to the reviewed patched registry artifact', () => {
+  assert.equal(require('http-cache-semantics/package.json').version, '4.3.0');
+  assert.equal(createHash('sha256').update(readFileSync(actualPath)).digest('hex'),
+    'd2fab3018e8b95d228548a26e0a061e38716fb1d43fc97b87524d330551e78b2');
 });
-
-for (const [label, path] of [['vendor', vendorPath], ['resolved downloader', actualPath]]) {
+for (const [label, path] of [['resolved downloader', actualPath]]) {
   const Policy = require(path);
   const req = { url: 'https://example.test/file', method: 'GET', headers: { host: 'example.test' } };
   for (const directive of ['max-stale', 'max-stale=999999']) {
@@ -21,7 +21,8 @@ for (const [label, path] of [['vendor', vendorPath], ['resolved downloader', act
       { 'cache-control': 'max-age=1, no-cache' },
       { 'cache-control': 'max-age=1, no-store' },
       { 'cache-control': 'max-age=1, private' },
-    ]) {
+    ].flatMap(headers => [headers, { ...headers,
+      'cache-control': `${headers['cache-control']}, stale-while-revalidate=999999` }])) {
       test(`${label}: ${directive} cannot override ${JSON.stringify(headers)}`, () => {
         const policy = new Policy(req, { status: 200, headers }, { shared: true });
         policy.now = () => policy._responseTime + 10000;
@@ -31,6 +32,7 @@ for (const [label, path] of [['vendor', vendorPath], ['resolved downloader', act
         const restored = Policy.fromObject(policy.toObject());
         restored.now = policy.now;
         assert.equal(restored.satisfiesWithoutRevalidation(incoming), false);
+        assert.equal(restored.evaluateRequest(incoming).response, undefined);
       });
     }
   }
@@ -43,3 +45,19 @@ for (const [label, path] of [['vendor', vendorPath], ['resolved downloader', act
     }
   });
 }
+
+test('explicit shared-cookie opt-in and private proxy policies retain stale reuse', () => {
+  const Policy = require(actualPath);
+  const request = { url: 'https://example.test/file', method: 'GET', headers: { host: 'example.test' } };
+  for (const [shared, directive] of [[true, 'public'], [true, 'immutable'], [false, 'proxy-revalidate']]) {
+    const policy = new Policy(request, { status: 200, headers: {
+      'cache-control': `max-age=1, ${directive}`, 'set-cookie': 'session=private',
+    } }, { shared });
+    policy.now = () => policy._responseTime + 10000;
+    const incoming = { ...request, headers: { ...request.headers, 'cache-control': 'max-stale=999999' } };
+    assert.equal(policy.satisfiesWithoutRevalidation(incoming), true);
+    const restored = Policy.fromObject(policy.toObject());
+    restored.now = policy.now;
+    assert.equal(restored.satisfiesWithoutRevalidation(incoming), true);
+  }
+});

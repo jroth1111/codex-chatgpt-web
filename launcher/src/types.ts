@@ -22,7 +22,11 @@ export interface LauncherState {
   automaticWebSessionLimitCount: number;
   automaticWebSessionLimitMinutes: number;
   experimentalBiggerContext: boolean;
+  biggerContextAvailable?: boolean;
+  plusNativeContextAvailable?: boolean;
+  composerPredictionsEnabled: boolean;
   experimentalSkillAttachments: boolean;
+  experimentalPlusNativeContext: boolean;
   experimentalNoAutoCompact: boolean;
   experimentalPreparedWebSession: boolean;
   keepRunningOnClose: boolean;
@@ -54,6 +58,7 @@ export interface BrowserState {
   url: string;
   title: string;
   authenticated: boolean;
+  passkeyPhase?: "opening" | "waiting" | "importing" | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -189,6 +194,8 @@ export interface LauncherApi {
   continuePasskeyLogin(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
+  setSessionReminderVisible(visible: boolean): Promise<void>;
+  onSessionReminderLogout(listener: () => void): () => void;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
@@ -214,6 +221,7 @@ export interface LauncherApi {
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;
+  setExperimentalPlusNativeContext(enabled: boolean): Promise<LauncherState>;
   setExperimentalNoAutoCompact(enabled: boolean): Promise<LauncherState>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCodex(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
@@ -227,6 +235,7 @@ export interface LauncherApi {
   setConnectorNameSuffix(suffix: string): Promise<LauncherState>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
+  setComposerPredictions(enabled: boolean): Promise<LauncherState>;
   setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;
   setUseSavedChats(enabled: boolean): Promise<LauncherState>;
   setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
@@ -257,5 +266,11 @@ export interface LauncherApi {
 declare global {
   interface Window {
     codexWebLauncher?: LauncherApi;
+    codexSessionReminder?: {
+      language(): Promise<Language>;
+      resize(height: number): Promise<void>;
+      action(action: "dismiss" | "logout"): Promise<void>;
+      onLanguage(listener: (language: Language) => void): () => void;
+    };
   }
 }

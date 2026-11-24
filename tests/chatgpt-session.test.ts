@@ -1,35 +1,80 @@
 import { expect, test } from "bun:test";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker } from "../src/adapters/chatgpt-web/browser-worker";
 import {
-  CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   activateChatGptEffortMenu,
+} from "../src/chatgpt-ui/model-picker";
+import {
   assertNewChatPage,
+  CHATGPT_COMPOSER_SELECTOR,
+  CHATGPT_STOP_BUTTON_SELECTOR,
   chatGptNewChatUrl,
+  CHATGPT_NEW_CHAT_URL,
+  CHATGPT_TEMPORARY_CHAT_ACTIVE_SELECTOR,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
 
-test("saved chats start empty and cannot reuse an arbitrary conversation or a Temporary Chat", async () => {
+test("French generation stays live beyond the completion grace period and still requires a finished answer", () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  // Captured from the French composer: this renderer has no stop-button test id.
+  const document = createDocument('<form data-chatgpt-composer><button type="button" aria-label="Arrêter"><svg class="icon-primary-action"><path d="M4.5 5.75C4.5 5.05964 5.05964 4.5 5.75 4.5H14.25C14.9404 4.5 15.5 5.05964 15.5 5.75V14.25C15.5 14.9404 14.9404 15.5 14.25 15.5H5.75C5.05964 15.5 4.5 14.9404 4.5 14.25V5.75Z"></path></svg></button></form>');
+  const tracker = new ChatGptTurnDomHealthTracker();
+  const state = () => ({ responsePresent: true, running: !!document.querySelector(CHATGPT_STOP_BUTTON_SELECTOR),
+    currentText: "Résumé partiel", completionActionVisible: false });
+  expect(state().running).toBeTrue();
+  for (const now of [0, 60_000, 60_001, 180_000]) expect(tracker.update(state(), now)).toBeUndefined();
+  document.querySelector("button")!.remove();
+  expect(state().running).toBeFalse();
+  expect(tracker.update(state(), 180_001)).toBeUndefined();
+  expect(tracker.update(state(), 240_001)).toBeUndefined();
+  expect(tracker.update(state(), 780_002)).toBeUndefined();
+  expect(tracker.update(state(), 780_003)).toContain("did not expose its completed-turn action");
+  expect(tracker.update({ ...state(), completionActionVisible: true }, 780_004)).toBeUndefined();
+});
+
+test("generation control detection preserves legacy and English controls and excludes unrelated French buttons", () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<button data-testid="stop-button" id="legacy"></button>
+    <button type="button" aria-label="Arrêter" id="outside"></button>
+    <form><button type="button" aria-label="Arrêter" id="other-form"></button></form>
+    <form data-chatgpt-composer>
+      <button type="button" aria-label="Stop" id="english"></button>
+      <button type="button" aria-label="Arrêter" id="french"><svg class="icon-primary-action"><path d="M4.5 5.75C4.5 5.05964 5.05964 4.5 5.75 4.5H14.25C14.9404 4.5 15.5 5.05964 15.5 5.75V14.25C15.5 14.9404 14.9404 15.5 14.25 15.5H5.75C5.05964 15.5 4.5 14.9404 4.5 14.25V5.75Z"></path></svg></button>
+      <button type="submit" aria-label="Arrêter" id="submit"></button>
+      <button type="button" aria-label="Envoyer" id="send"></button>
+      <button type="button" aria-label="Arrêter autre chose" id="different-action"></button>
+    </form>`);
+  expect(Array.from(document.querySelectorAll(CHATGPT_STOP_BUTTON_SELECTOR)).map(element => element.id))
+    .toEqual(["legacy", "english", "french"]);
+});
+
+test.each([false, true])("new chats verify the configured saved preference without inheriting a prior conversation (%s)", async useSavedChats => {
+  const target = chatGptNewChatUrl(useSavedChats);
   expect(chatGptNewChatUrl()).toBe("https://chatgpt.com/?temporary-chat=true");
   expect(chatGptNewChatUrl(true)).toBe("https://chatgpt.com/");
   const prepare = (ChatGptBrowserWorker.prototype as any).prepareChatSurface;
-  for (const saved of [false, true]) {
-    let url = "https://chatgpt.com/c/previous-task";
+  for (const initial of ["https://chatgpt.com/c/previous-task", "https://chatgpt.com/?temporary-chat=true", "about:blank", CHATGPT_NEW_CHAT_URL]) {
+    let url = initial;
     const navigations: string[] = [];
-    const absent: any = { filter: () => absent, last: () => absent, isVisible: async () => false };
+    const absent: any = { filter: () => absent, last: () => absent, isVisible: async () => false, count: async () => 0 };
     const composer: any = { count: async () => 1, nth: () => composer, isVisible: async () => true };
     const page: any = {
       url: () => url,
+      getByRole: () => absent,
+      getByText: () => absent,
       goto: async (next: string) => { url = next; navigations.push(next); },
-      locator: (selector: string) => selector === CHATGPT_COMPOSER_SELECTOR ? composer : absent,
+      locator: (selector: string) => selector === CHATGPT_COMPOSER_SELECTOR
+        || (selector === CHATGPT_TEMPORARY_CHAT_ACTIVE_SELECTOR && !useSavedChats) ? composer : absent,
     };
-    expect(await prepare.call({ activeComposer: async () => composer }, page, undefined, saved)).toBe(composer);
-    expect(navigations).toEqual([chatGptNewChatUrl(saved)]);
-    await expect(assertNewChatPage(page, !saved)).rejects.toThrow("requested new");
-    url = "https://chatgpt.com/c/previous-task";
-    await expect(assertNewChatPage(page, saved)).rejects.toThrow("requested new");
+    expect(await prepare.call({ config: { useSavedChats }, activeComposer: async () => composer }, page)).toBe(composer);
+    expect(navigations).toEqual(initial === target ? [] : [target]);
+    await expect(assertNewChatPage(page, useSavedChats)).resolves.toBeUndefined();
+    for (const invalid of ["https://chatgpt.com/c/previous-task", chatGptNewChatUrl(!useSavedChats), "https://example.com/"]) {
+      url = invalid;
+      await expect(assertNewChatPage(page, useSavedChats)).rejects.toThrow("requested new");
+    }
   }
 });
 
@@ -55,6 +100,23 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
   expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "power-effort"]);
 });
 
+// 2026-10-29, #924: the trigger lost all three older identifying attributes.
+test.each(["选择 ChatGPT 模型", "Select ChatGPT model", ""])("inline reasoning control is structural, independent of label (%s)", label => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<form>
+    <button type="button" aria-label="${label}" aria-haspopup="menu"
+      data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max" id="inline">思考强度</button>
+    <button aria-haspopup="menu" data-composer-navigation-target="reasoning"></button>
+    <button aria-haspopup="menu" data-selected-reasoning-effort="max"></button>
+    <button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button>
+    <button aria-haspopup="dialog" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button>
+    <button aria-haspopup="menu" data-composer-navigation-target="attachments" data-selected-reasoning-effort="max"></button>
+    <button aria-label="${label}" aria-haspopup="menu"></button>
+    <div role="button" aria-haspopup="menu" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></div>
+  </form>`);
+  expect(Array.from(document.querySelectorAll(CHATGPT_EFFORT_CONTROL_SELECTOR)).map(element => element.id)).toEqual(["inline"]);
+});
+
 test("effort activation binds the owned menu after the control opens", async () => {
   let opened = false;
   const ownedMenu = { isVisible: async () => opened };
@@ -72,7 +134,7 @@ test("effort activation binds the owned menu after the control opens", async () 
       return null;
     },
     click: async (options: unknown) => {
-      expect(options).toEqual({ force: true, timeout: 1 });
+      expect(options).toEqual({ timeout: 1 });
       opened = true;
     },
   };
@@ -155,7 +217,7 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   expect(activation.method).toBe("pointerdown");
   expect(activation.menu).toBe(ownedMenu as never);
   expect(events).toEqual([
-    ["click", { force: true, timeout: 1 }],
+    ["click", { timeout: 1 }],
     ["keyboard", "Escape"],
     ["pointerdown", { button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }],
   ]);
@@ -182,15 +244,18 @@ test("effort activation fails closed when neither event exposes a structural sur
     .rejects.toThrow("did not expose its owned menu or structural slider");
 });
 
-test("a complete authenticated composer with no effort selector is Luna-only", async () => {
+test("an authenticated composer without recognized model controls cannot be classified as Luna-only", async () => {
   const effortButton = {
     filter() { return this; },
+    or() { return this; },
+    count: async () => 0,
     last() { return this; },
     isVisible: async () => false,
   };
   const composerForm = {
     count: async () => 1,
     locator: () => effortButton,
+    getByRole: () => effortButton,
   };
   const composer = {
     filter() { return this; },
@@ -207,13 +272,15 @@ test("a complete authenticated composer with no effort selector is Luna-only", a
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, extraHighAvailable: false, proAvailable: false });
+  })).rejects.toThrow("Could not identify ChatGPT's model controls");
 });
 
-test("a transient effort control does not turn a Luna-only account into Sol", async () => {
+test("a transient effort control cannot establish either paid or Luna capabilities", async () => {
   let visibilityReads = 0;
   const effortButton = {
     filter() { return this; },
+    or() { return this; },
+    count: async () => 0,
     last() { return this; },
     isVisible: async () => {
       visibilityReads += 1;
@@ -223,6 +290,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   const composerForm = {
     count: async () => 1,
     locator: () => effortButton,
+    getByRole: () => effortButton,
   };
   const composers = {
     filter() { return this; },
@@ -238,7 +306,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, extraHighAvailable: false, proAvailable: false });
+  })).rejects.toThrow("Could not identify ChatGPT's model controls");
   expect(visibilityReads).toBe(2);
 });
 
@@ -294,9 +362,9 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
   };
   const composer = { filter() { return this; }, last() { return this; }, count: async () => 1, isEditable: async () => true, locator: () => ({ count: async () => 1, locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows, getByRole: () => ({ count: async () => 0 }) };
   const page = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: async () => true,
     locator: (selector: string) => {
       if (selector === CHATGPT_COMPOSER_SELECTOR) return composer;
@@ -330,6 +398,18 @@ test("an effort-control observation failure cannot become a Luna-only detection"
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
   })).rejects.toThrow("Ambiguous effort controls");
+});
+
+test("cancelling a missing model-control probe does not return Luna capabilities", async () => {
+  const fixture = reasoningPicker();
+  fixture.control.isVisible = async () => false;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 10);
+  try {
+    const failure = await detectChatGptAccountCapabilities(fixture.page as never, { signal: abort.signal })
+      .then(() => undefined, (error: unknown) => error);
+    expect(failure).toMatchObject({ name: "AbortError" });
+  } finally { clearTimeout(timer); }
 });
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {

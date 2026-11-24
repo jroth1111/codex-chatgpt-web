@@ -35,6 +35,57 @@ test("one prepared page transfers ownership without allocating or replaying a co
   assert.equal(warm.bootstrapReady, true);
 });
 
+test("same-trace retry transfers a prepared page without retaining a competing failed owner", async () => {
+  const key = "a".repeat(64);
+  const failed = ready({ id: "failed", traceId: "trace_retry", status: "running",
+    startupPreparation: false, startupReady: false, conversationKey: key });
+  const warm = ready(), f = fixture([failed, warm]);
+  const closed = [];
+  failed.view = { webContents: { isDestroyed: () => false, setBackgroundThrottling() {},
+    close: () => closed.push(failed.id) } };
+  f.host.window = { contentView: { removeChildView() {} } };
+  f.host.syncPowerSaveBlocker = () => {};
+  await f.host.endTurn(failed.traceId, process.pid, "failed", false);
+  assert.equal(failed.status, "error");
+  assert.notEqual(failed.failedAt, undefined);
+  const lease = await f.host.beginTurn(failed.traceId, false, process.pid, true, key, "Codex Native2",
+    false, undefined, { surfaceId: warm.surfaceId });
+  assert.equal(lease.startupPrepared, true);
+  assert.equal(lease.reused, false);
+  assert.equal(f.allocations, 0);
+  assert.deepEqual(closed, [failed.id]);
+  assert.deepEqual([...f.host.turnTabs.values()], [warm]);
+  assert.doesNotThrow(() => f.host.heartbeatTurn(failed.traceId, process.pid));
+  assert.deepEqual(await f.host.endTurn(failed.traceId, process.pid, "completed", false, undefined, true, true),
+    { cancelledByUser: false });
+  assert.equal(warm.status, "ready");
+  assert.equal(warm.connectorBound, true);
+});
+
+test("prepared transfers bound old-owner receipts and retain the exact previous helper", async () => {
+  const warm = ready(), f = fixture([warm]);
+  f.host.closedTurnOwners = new Map(Array.from({ length: 256 }, (_, i) => [`old-${i}`, { helperPid: process.pid, remainingAcks: 1 }]));
+  await f.host.beginTurn("trace_new", false, process.pid, true, undefined, "Codex Native2",
+    false, undefined, { surfaceId: warm.surfaceId });
+  assert.deepEqual(f.host.closedTurnOwners.get("startup_old"), { helperPid: process.pid, remainingAcks: 2 });
+  assert.equal(f.host.closedTurnOwners.size, 256);
+  assert.equal(f.host.closedTurnOwners.has("old-0"), false);
+});
+
+test("prepared transfer keeps one old-owner retry after its original end response is lost", async () => {
+  const warm = ready(), f = fixture([warm]);
+  await f.host.beginTurn("trace_new", false, process.pid, true, undefined, "Codex Native2",
+    false, undefined, { surfaceId: warm.surfaceId });
+  await assert.rejects(f.host.endTurn("startup_old", process.pid + 1, "aborted", false), /ownership mismatch/);
+  assert.deepEqual(await f.host.endTurn("startup_old", process.pid, "aborted", false), { cancelledByUser: false });
+  await assert.rejects(f.host.endTurn("startup_old", process.pid + 1, "aborted", false), /ownership mismatch/);
+  assert.deepEqual(await f.host.endTurn("startup_old", process.pid, "aborted", false), { cancelledByUser: false });
+  await assert.rejects(f.host.endTurn("startup_old", process.pid, "aborted", false), /ownership mismatch/);
+  assert.equal(f.host.turnTabs.get(warm.id), warm);
+  assert.equal(warm.traceId, "trace_new");
+  assert.equal(warm.status, "running");
+});
+
 test("speculative startup does not evict a retained page at the configured capacity", async () => {
   const retained = ready({ startupPreparation: false, startupReady: false, conversationKey: "a".repeat(64) });
   const f = fixture([retained], 1);
@@ -52,6 +103,22 @@ test("preparing a standby during work adds a tab without stealing its visible se
     false, undefined, { preparing: true });
   assert.equal(f.host.turnTabs.size, 2);
   assert.equal(f.host.selectedTabId, running.id);
+});
+
+test("closing the selected work page never reveals an unfinished standby picker", () => {
+  for (const startupReady of [false, true]) {
+    const warm = ready({ startupReady, status: startupReady ? "ready" : "running" });
+    const running = ready({ id: "running", startupPreparation: false, status: "running" });
+    const f = fixture([warm, running]);
+    f.host.selectedTabId = running.id;
+    f.host.syncPowerSaveBlocker = () => {};
+    f.host.window = { contentView: { removeChildView() {} } };
+    running.view.webContents.close = () => {};
+    f.host.removeTurnTab(running, false);
+    assert.equal(f.host.selectedTabId, startupReady ? warm.id : "home");
+    assert.equal(f.host.turnTabs.get(warm.id), warm);
+    assert.equal(warm.startupReady, startupReady);
+  }
 });
 
 for (const extra of [{ helperPid: process.pid + 1000 }, { startupReady: false }, { authenticationRequired: true },

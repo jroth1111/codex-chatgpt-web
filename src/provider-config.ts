@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { getConfigDir, type AppConfig } from "./config";
 import type { CodexProviderConfig } from "./types";
-import { effectiveExperimentalBiggerContext } from "./context-mode";
+import { effectiveExperimentalBiggerContext, effectiveExperimentalPlusNativeContext } from "./context-mode";
 import { CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL, CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL } from "./chatgpt-web-models";
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
@@ -55,6 +55,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       ),
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       ...(!manual && config.experimentalParallelSubagents === true ? { experimentalParallelSubagents: true } : {}),
+      experimentalPlusNativeContext: effectiveExperimentalPlusNativeContext(config),
       experimentalFreshConversationPerTurn: !manual && !config.useEnhancedWebSessionMode && config.experimentalFreshConversationPerTurn === true,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),

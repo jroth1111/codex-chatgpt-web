@@ -1,6 +1,6 @@
 import { posix, win32 } from "node:path";
 import { GATEWAY_AGENT_WAIT_TOOL_NAMES, gatewayToolNameIsValid } from "./mcp-gateway";
-import { CHATGPT_WEB_AGENT_WAIT_POLL_MS, CONNECTOR_LONG_POLL_SLICE_MS } from "./mcp-tool-inventory";
+import { CHATGPT_WEB_AGENT_WAIT_POLL_MS, CONNECTOR_LONG_POLL_SLICE_MS, CHATGPT_WEB_COMMAND_POLL_INPUT_MAX_MS, COMMAND_POLL_TRANSPORT_RULE } from "./mcp-tool-inventory";
 
 export const ONE_SHOT_SHELL_TTY_ERROR = "The one-shot shell_command cannot provide a TTY or accept later stdin. Pipe input inside the same command and use APIs compatible with the active platform shell.";
 
@@ -8,7 +8,7 @@ function gatewayNestedToolName(toolName: string): string {
   return toolName.replace(/[^A-Za-z0-9_$]/g, "_");
 }
 
-function execGatewayResultProgram(invocation: string[]): string {
+function execGatewayResultProgram(invocation: string[], resultMarker?: string): string {
   return [
     ...invocation,
     "const emit = value => {",
@@ -25,6 +25,16 @@ function execGatewayResultProgram(invocation: string[]): string {
     "  text(value);",
     "};",
     "emit(result);",
+    ...(resultMarker ? [
+      "const object = result !== null && typeof result === \"object\" && !Array.isArray(result);",
+      "const mcp = object && Array.isArray(result.content);",
+      "const structured = mcp ? result.structuredContent : object ? result : undefined;",
+      "const metadata = {",
+      "  ...(structured !== null && typeof structured === \"object\" && !Array.isArray(structured) ? { structuredContent: structured } : {}),",
+      "  ...(mcp && typeof result.isError === \"boolean\" ? { isError: result.isError } : {}),",
+      "};",
+      `text(${JSON.stringify(resultMarker)} + JSON.stringify(metadata));`,
+    ] : []),
   ].join("\n");
 }
 
@@ -33,6 +43,7 @@ export function execGatewayProgram(
   freeform: boolean,
   payload: { arguments?: Record<string, unknown>; input?: string },
   excludedNames: string[] = [],
+  resultMarker?: string,
 ): string {
   if (!gatewayToolNameIsValid(nestedToolName) || excludedNames.includes(nestedToolName)) {
     throw new Error(`Codex nested tool is not available in this turn: ${nestedToolName}`);
@@ -48,7 +59,7 @@ export function execGatewayProgram(
     "const nestedTool = tools[nestedToolName];",
     "if (typeof nestedTool !== \"function\") throw new Error(\"Native nested tool is listed but unavailable\");",
     `const result = await nestedTool(${JSON.stringify(nestedInput)});`,
-  ]);
+  ], resultMarker);
 }
 
 export function transportBoundRawExecProgram(input: string, blockedExecName: string, asyncAgentWait = false): string {
@@ -62,6 +73,8 @@ export function transportBoundRawExecProgram(input: string, blockedExecName: str
     `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
     `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
     `  const commandPollMs = ${CONNECTOR_LONG_POLL_SLICE_MS};`,
+    `  const commandPollMaxMs = ${CHATGPT_WEB_COMMAND_POLL_INPUT_MAX_MS};`,
+    `  const commandPollRule = ${JSON.stringify(COMMAND_POLL_TRANSPORT_RULE)};`,
     "  const registryNames = new Set(Reflect.ownKeys(source));",
     "  if (typeof ALL_TOOLS !== \"undefined\" && Array.isArray(ALL_TOOLS)) {",
     "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\") registryNames.add(tool.name);",
@@ -84,6 +97,7 @@ export function transportBoundRawExecProgram(input: string, blockedExecName: str
     "    } else if (typeof value === \"function\" && typeof name === \"string\" && commandPollNames.has(name)) {",
     "      exposed = args => {",
     "        if (!args || typeof args !== \"object\" || Array.isArray(args)) return Reflect.apply(value, source, [args]);",
+    "        if (name === \"write_stdin\" && args.yield_time_ms !== undefined && (!Number.isInteger(args.yield_time_ms) || args.yield_time_ms < 250 || args.yield_time_ms > commandPollMaxMs)) throw new Error(commandPollRule);",
     "        const key = typeof args.timeout_ms === \"number\" ? \"timeout_ms\" : typeof args.yield_time_ms === \"number\" ? \"yield_time_ms\" : undefined;",
     "        const boundedArgs = !key || args[key] <= commandPollMs ? args : { ...args, [key]: commandPollMs };",
     "        return Reflect.apply(value, source, [boundedArgs]);",
@@ -110,6 +124,7 @@ export function transportBoundRawExecProgram(input: string, blockedExecName: str
 export function execCommandGatewayProgram(
   execCommandArguments: Record<string, unknown>,
   shellCommandArguments: Record<string, unknown>,
+  resultMarker?: string,
 ): string {
   const execCommandName = gatewayNestedToolName("exec_command");
   const shellCommandName = gatewayNestedToolName("shell_command");
@@ -124,7 +139,7 @@ export function execCommandGatewayProgram(
     `if (nativeCommandName === ${JSON.stringify(shellCommandName)} && ${execCommandArguments.tty === true}) throw new Error(${JSON.stringify(ONE_SHOT_SHELL_TTY_ERROR)});`,
     `const nativeCommandInput = nativeCommandName === ${JSON.stringify(execCommandName)} ? ${JSON.stringify(execCommandArguments)} : ${JSON.stringify(shellCommandArguments)};`,
     "const result = await nativeCommand(nativeCommandInput);",
-  ]);
+  ], resultMarker);
 }
 
 export function claudeBashCommand(cmd: string, workdir?: string): string {

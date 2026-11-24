@@ -33,6 +33,34 @@ test.skipIf(process.platform === "win32")("closing a rejected broker leaves the 
   }
 });
 
+test("a broker whose endpoint was busy at startup recovers once it is released", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-retry-"));
+  const endpoint = defaultBrokerEndpoint(root);
+  const previousOwner = createServer(socket => socket.destroy());
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    if (!isWindowsPipeEndpoint(endpoint)) mkdirSync(dirname(endpoint), { recursive: true, mode: 0o700 });
+    await new Promise<void>(resolve => previousOwner.listen(endpoint, resolve));
+    if (process.platform !== "win32") chmodSync(endpoint, 0o600);
+    // The daemon only logs this startup failure and keeps serving; later turns must not inherit it.
+    await expect(broker.listen()).rejects.toThrow(process.platform === "win32" ? "EADDRINUSE" : "already owned by another process");
+    await new Promise<void>(resolve => previousOwner.close(() => resolve()));
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    }, 10_000);
+    await expect(callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token }))
+      .resolves.toMatchObject({ bindingId: expect.any(String) });
+  } finally {
+    await broker.close();
+    if (previousOwner.listening) await new Promise<void>(resolve => previousOwner.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
@@ -305,8 +333,8 @@ test("turn broker tokens do not expire while their browser turn is still alive",
     });
     expect(token).toMatch(/^turn_[a-f0-9]{32}$/);
     await Bun.sleep(5);
-    expect(await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token }))
-      .toMatchObject({ bindingId: expect.any(String) });
+    await expect(callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token }))
+      .resolves.toMatchObject({ bindingId: expect.any(String) });
   } finally {
     await broker.close();
     rmSync(root, { recursive: true, force: true });
@@ -425,8 +453,8 @@ test("turn broker revokes only channels owned by the closed browser trace", asyn
     expect(broker.revokeTrace("trace_target")).toBe(1);
     await expect(callTurnBroker(socketPath, { method: "claim", token: target }))
       .rejects.toThrow("already finished");
-    expect(await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token: other }))
-      .toMatchObject({ bindingId: expect.any(String) });
+    await expect(callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token: other }))
+      .resolves.toMatchObject({ bindingId: expect.any(String) });
   } finally {
     await broker.close();
     rmSync(root, { recursive: true, force: true });
@@ -459,7 +487,7 @@ test("an unbounded broker call fails when the broker closes without answering", 
   }
 }, 10_000);
 
-test("bounded broker calls settle validated replies without depending on peer closure", async () => {
+test("bounded broker calls settle complete frames without waiting for server-owned EOF", async () => {
   let peer!: Socket;
   let finishFrame!: () => void;
   const frameWritten = new Promise<void>(resolve => { finishFrame = resolve; });
@@ -476,8 +504,7 @@ test("bounded broker calls settle validated replies without depending on peer cl
   try {
     const call = callTurnBroker(broker.socketPath, { method: "owner_status" });
     await frameWritten;
-    expect(await call).toEqual({ ready: true });
-    expect(peer.writableEnded).toBeFalse();
+    await expect(call).resolves.toEqual({ ready: true });
   } finally {
     peer?.destroy();
     await broker.close();

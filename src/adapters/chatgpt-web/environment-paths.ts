@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 
@@ -30,19 +31,7 @@ export function matchesPath(root: string, path: string): boolean {
 export function environmentCwdMatches(text: string, preferredRoots: string[] = []): string[] {
   const sections = [...text.matchAll(/<environments>([\s\S]*?)<\/environments>/gi)];
   if (sections.length === 0) {
-    const cwdMatches = [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
-    if (cwdMatches.length > 0 || /<\/?cwd\b/i.test(text)) return cwdMatches;
-
-    // Codex 0.150+ orders filesystem-only roots with the working directory first.
-    // Recover only this exact shape; malformed cwd/root markup stays fail closed.
-    const rootSections = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/gi)];
-    if (rootSections.length !== 1) return [];
-    const rootSection = rootSections[0]![0];
-    const roots = [...rootSection.matchAll(/<root>([^<]+)<\/root>/gi)].map(match => match[1] ?? "");
-    const rootOpenings = [...rootSection.matchAll(/<root\b[^>]*>/gi)];
-    const rootClosings = [...rootSection.matchAll(/<\/root\s*>/gi)];
-    if (rootOpenings.length !== roots.length || rootClosings.length !== roots.length) return [];
-    return roots.length > 0 ? [roots[0]!] : [];
+    return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
   }
   if (sections.length !== 1) return [];
 
@@ -84,22 +73,31 @@ export function uniqueAbsolutePaths(values: string[], field: string): string[] {
   return [...unique.values()];
 }
 
-export function isCurrentOrParentThreadVisualizationRoot(path: string, metadata: Record<string, unknown>): boolean {
+export function isCurrentOrParentThreadVisualizationRoot(
+  path: string, metadata: Record<string, unknown>,
+  codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"),
+): boolean {
   const threadIds = [metadata.thread_id, metadata.parent_thread_id]
     .filter((value): value is string => typeof value === "string")
     .map(value => process.platform === "win32" ? value.trim().toLowerCase() : value.trim())
     .filter(Boolean);
   if (threadIds.length === 0) return false;
 
-  const configuredCodexHome = process.env.CODEX_HOME?.trim();
-  const base = pathIdentity(join(resolve(configuredCodexHome || join(homedir(), ".codex")), "visualizations"));
+  const candidateHome = resolve(path, "../../../../..");
+  const base = pathIdentity(join(candidateHome, "visualizations"));
   const rel = relative(base, pathIdentity(path));
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false;
 
   const parts = rel.split(sep);
-  return parts.length === 4
+  if (!(parts.length === 4
     && /^\d{4}$/.test(parts[0]!)
     && /^(?:0[1-9]|1[0-2])$/.test(parts[1]!)
     && /^(?:0[1-9]|[12]\d|3[01])$/.test(parts[2]!)
-    && threadIds.includes(parts[3]!);
+    && threadIds.includes(parts[3]!))) return false;
+  if (pathIdentity(candidateHome) === pathIdentity(codexHome)) return true;
+  // Only local paths may trigger filesystem lookup; a local drive namespace is safe.
+  if (/^(?:\\\\|\/\/)/.test(candidateHome) && !/^\\\\\?\\[a-z]:\\/i.test(candidateHome)) return false;
+  // Resolve only the home alias, never symlinks inside its visualization subtree.
+  try { return pathIdentity(realpathSync(candidateHome)) === pathIdentity(realpathSync(codexHome)); }
+  catch { return false; }
 }

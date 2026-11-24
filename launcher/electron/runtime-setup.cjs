@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const { randomBytes } = require("node:crypto");
 const { isLegacyConnectorName, validateConnectorName, validateConnectorNameSuffix } = require("./connector-identity.cjs");
 const { assertBiggerContextChangeAllowed } = require("./context-mode.cjs");
+const { compareVersions } = require("./update.cjs");
 const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 
@@ -19,6 +20,7 @@ async function runSetup(name, args, options) {
   this.lifecycleOperation = name;
   let setupCommandStarted = false;
   let runtimeTransitionStarted = false;
+  let runtimeStartAttempted = false;
   try {
     if (this.launcherProfile === "production") {
       await this.run(name, [...args, "--preflight-only"], {
@@ -33,6 +35,7 @@ async function runSetup(name, args, options) {
     else await this.supervisor.stopForSetup(name === "browser-interaction-mode" ? { browserOnly: true } : undefined);
     setupCommandStarted = true;
     const result = await this.run(name, args, options);
+    runtimeStartAttempted = true;
     const runtime = await this.supervisor.startIfConfigured();
     if (runtime.status !== "ready") {
       throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
@@ -44,6 +47,7 @@ async function runSetup(name, args, options) {
     const failures = [];
     let rolledBack = false;
     let checkpointChanged = false;
+    let checkpointRestored = false;
     if (!previousRuntime.configured && setupCommandStarted) {
       try {
         rolledBack = await this.rollbackFirstSetup(checkpoint);
@@ -63,14 +67,20 @@ async function runSetup(name, args, options) {
         );
       }
       try {
+        if (options.previousRuntimeCompatible === false && runtimeStartAttempted) {
+          await this.supervisor.stopForSetup();
+        }
         this.restoreSetupCheckpoint(checkpoint);
+        checkpointRestored = true;
       } catch (caught) {
         failures.push(caught instanceof Error ? caught.message : String(caught));
       }
     }
     let recoveryError;
     try {
-      if (runtimeTransitionStarted) {
+      if (runtimeTransitionStarted && options.previousRuntimeCompatible === false) {
+        if (checkpointRestored) failures.push("The saved configuration was preserved. Restart the launcher to retry the update.");
+      } else if (runtimeTransitionStarted) {
         await this.restorePreviousRuntime(previousRuntime, name, {
           repairExternal: previousRuntime.owner === "external" && checkpointChanged,
         });
@@ -292,6 +302,33 @@ module.exports = {
     return { ...result, mode, enabled: enabled === true };
   },
 
+  async setComposerPredictions(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Next-message predictions preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing next-message predictions");
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled ? "--composer-predictions" : "--no-composer-predictions",
+    ];
+    // DEV setup preserves approvals directly; only production setup parses this flag.
+    if (!development && current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling next-message predictions" : "Disabling next-message predictions",
+      successMessage: enabled ? "Next-message predictions enabled" : "Next-message predictions disabled",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("composer-predictions", args, options)
+      : await this.runSetup("composer-predictions", args, options);
+    return { ...result, enabled };
+  },
+
   async setSkillAttachments(enabled) {
     const current = this.runtimeConfigSnapshot();
     if (!current.configured) throw new Error("Initialize the runtime before changing Skills as files");
@@ -355,6 +392,43 @@ module.exports = {
     return { ...result, mode, enabled: enabled === true };
   },
 
+  async setExperimentalPlusNativeContext(enabled) {
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) {
+      throw new Error("Initialize the runtime before changing Plus native context");
+    }
+    const route = this.launcherProfile === "development"
+      ? null
+      : await this.bridgeStatus("plus-native-context-route");
+    const mode = current.mode;
+    const compactFlag = enabled === true ? "--plus-native-context" : "--standard-plus-context";
+    const args = [
+      ...(this.launcherProfile === "development" ? ["dev"] : []),
+      "setup",
+      mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      ...(this.launcherProfile === "development" ? [] : ["--replace-codex-route"]),
+      "--acknowledge-unofficial",
+      ...(this.launcherProfile === "development" ? [] : ["--restart-service"]),
+      compactFlag,
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const run = this.launcherProfile === "development"
+      ? this.runDevSetup.bind(this)
+      : this.runSetup.bind(this);
+    const result = await run("plus-native-context", args, {
+      message: enabled ? "Enabling experimental Plus native context" : "Disabling experimental Plus native context",
+      successMessage: enabled
+        ? "Plus native context enabled; restart Codex"
+        : "Standard Plus context restored; restart Codex",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    });
+    if (route && !route.active) await this.setBridgeEnabled(false);
+    return { ...result, mode, enabled: enabled === true };
+  },
+
   async upgradeManagedRuntime() {
     this.assertProductionProfile("Managed Codex runtime upgrade");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
@@ -381,18 +455,26 @@ module.exports = {
       || (existing.config?.releaseVersion === currentVersion && !connectorMigrationRequired && !tunnelProfileMigrationRequired)) {
       return { updated: false };
     }
-    const route = await this.bridgeStatus("runtime-upgrade-route");
+    if (compareVersions(currentVersion, existing.config.releaseVersion) < 0) {
+      throw new Error(
+        `This launcher is version ${currentVersion}, but a newer runtime ${existing.config.releaseVersion} is already installed. `
+        + `Open Codex Web GPT ${existing.config.releaseVersion} or newer to continue.`,
+      );
+    }
     const args = [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
-      // A release may repair capability detection. Reusing the previous result can
-      // keep eligible models disabled even after the corrected probe is installed.
-      ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities: true }),
+      // Account refresh is a separate action; an update preserves the installed model.
+      ...this.browserInteractionArgs({ mode: interactionMode }),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (interactionMode === "automatic" && existing.config?.autoApproveToolCalls === true) {
+      args.push("--auto-approve-tool-calls");
+    }
+    args.push("--preserve-disconnected-route");
     const result = await this.runSetup("runtime-upgrade", args, {
       message: tunnelProfileMigrationRequired
         ? `Separating ${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP credentials`
@@ -401,12 +483,11 @@ module.exports = {
         ? `${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP profile migrated`
         : `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+      previousRuntimeCompatible: existing.config.releaseVersion === currentVersion,
     });
-    if (!route.active) await this.setBridgeEnabled(false);
     return {
       updated: true,
       mode: existing.mode,
-      bridgeEnabled: route.active,
       fromVersion: existing.config.releaseVersion,
       toVersion: currentVersion,
       connectorMigrated: connectorMigrationRequired,

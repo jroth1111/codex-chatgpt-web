@@ -87,7 +87,12 @@ test.each([false, true])("Original compact sends complete opaque context when it
   };
   const compact = request(true);
   const events: AdapterEvent[] = [];
-  if (experimentalBiggerContext) compact.context.messages.at(-1)!.content += "x".repeat(160_000);
+  if (experimentalBiggerContext) {
+    const padding = "x".repeat(160_000);
+    compact.context.messages.at(-1)!.content += padding;
+    const raw = compact._rawBody as { input: Array<{ content: Array<{ text: string }> }> };
+    raw.input[0]!.content[0]!.text += padding;
+  }
   try {
     await createChatGptWebAdapter(provider, { accountSafety: new ChatGptAccountSafety(join(root, "account-safety.json")) }).runTurn!(
       compact,
@@ -200,7 +205,7 @@ test.each([false, true])("structured compact rebuild after retained browser loss
     if (rateLimited) throw new ChatGptWebAdapterError("ChatGPT rate limit: too many requests.", {
       status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
     });
-    const token = preparedText.match(/turn_token (control_[A-Za-z0-9_-]+)/)?.[1];
+    const token = preparedText.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
     const handoffId = preparedText.match(/handoff_id (handoff_[A-Za-z0-9_-]+)/)?.[1];
     if (!token || !handoffId) throw new Error("Fresh compaction rebuild has no one-shot control identity");
     await callTurnBroker(provider.chatgptWeb!.brokerSocketPath!, {

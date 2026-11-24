@@ -1,19 +1,51 @@
-import { expect, test } from "bun:test";
-import { chromium } from "playwright-core";
+import { launchDomBrowser } from "./support/dom-browser";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { type Browser } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
-import { detectChatGptAccountCapabilities } from "../src/chatgpt-session";
+import { setChatGptThinkMode } from "../src/adapters/chatgpt-web/think-mode";
+import { CHATGPT_COMPOSER_SELECTOR, detectChatGptAccountCapabilities } from "../src/chatgpt-session";
+import { CHATGPT_EFFORT_CONTROL_SELECTOR } from "../src/chatgpt-ui/model-picker";
+import { assertChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
 
-for (const modern of [false, true])
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the ${modern ? "power" : "classic"} picker without racing Escape cleanup`, async () => {
-  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("GPT-5.6 Pro verifies the split model/effort header before Send (#875)", async () => {
+  const context = await browser.newContext();
   try {
-    const page = await browser.newPage();
+    const page = await context.newPage();
+    await page.setContent(`<div id="picker" role="menu">
+      <div data-model-picker-view-toggle="true"><div data-menu-row-content><span>5.6 Sol</span><span id="effort-label">5.6 Pro</span></div></div>
+      <div role="menuitemradio" aria-checked="false">6</div>
+      <div role="menuitemradio" aria-checked="true">GPT-5.6 Sol</div>
+      <span id="status">5.6 Pro, 5 of 5.</span>
+      <div role="menuitem" aria-describedby="status"><div data-model-picker-power-slider>
+        <span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="4" aria-valuenow="4"></span>
+      </div></div></div>`);
+    const menu = {
+      menu: page.locator("#picker"), slider: page.locator('[role="slider"]'),
+    } as Parameters<typeof assertChatGptModelFamily>[0];
+    await assertChatGptModelFamily(menu, "5.6", "max", 4);
+    await page.locator("#effort-label").evaluate(element => { element.textContent = "6 Pro"; });
+    const failure = await assertChatGptModelFamily(menu, "5.6", "max", 4).then(() => undefined, error => error);
+    expect(failure).toMatchObject({ code: "model_version_unavailable", retryable: false });
+  } finally { await context.close(); }
+}, 15_000);
+
+let browser: Browser;
+beforeAll(async () => {
+  if (process.env.CHATGPT_DOM_TEST_BROWSER) browser = await launchDomBrowser();
+}, 30_000);
+afterAll(async () => { await browser?.close(); });
+for (const modern of [false, true])
+for (const picker of ["latest", "gpt6"])
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the ${modern ? "power" : "classic"} picker without racing Escape cleanup`, async () => {
+  const page = await browser.newPage();
+  try {
     page.setDefaultTimeout(2_000);
     await page.setContent(`<form><div id="prompt-textarea" contenteditable="true">Draft</div>
       <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Extra High</button></form>
       <div id="picker" role="menu" hidden><div ${modern ? 'data-model-picker-view="simple"' : ''}>
-        <div id="toggle" role="menuitem" aria-hidden="false" aria-expanded="false" data-model-picker-view-toggle="true">Select model</div>
-        <div id="models" hidden><div role="menuitemradio" aria-checked="true">Latest</div>
+        <div id="toggle" role="menuitem" ${picker === "gpt6" ? '' : 'aria-hidden="false"'} aria-expanded="false" data-model-picker-view-toggle="true">Select model</div>
+        <div id="models" hidden><div role="menuitemradio" aria-checked="true">${picker === "gpt6" ? '6' : 'Latest'}</div>
           <div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div></div>
         <span id="announcement">5.6 Extra High, 4 of 4.</span>
         <div role="menuitem" tabindex="0" aria-describedby="announcement">
@@ -43,14 +75,115 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
     expect(result.selection.label).toBe("5.6 Sol Extra High");
     expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(2);
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
-  } finally { await browser.close(); }
+  } finally { await page.close(); }
+}, 30_000);
+
+// Oct 8: shared "6" row. Oct 29 (#924): localized inline trigger without the old
+// tone, test ID or codex trigger. Exercise each retained control independently.
+const MODEL_CONTROLS = {
+  neutral: 'data-tone="neutral"',
+  dropdown: 'data-testid="model-switcher-dropdown-button"',
+  codexReasoning: 'data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning"',
+  inlineReasoning: 'data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max" aria-label="选择 ChatGPT 模型"',
+} as const;
+
+for (const repeatedVersion of [false, true])
+for (const [variant, attributes] of Object.entries(MODEL_CONTROLS))
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("GPT-6 and GPT-5.6 select efforts and verify before Send with " + variant + (repeatedVersion ? " with repeated version headers" : ""), async () => {
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.setContent(`<form data-chatgpt-composer>
+      <div contenteditable="true" data-composer-markdown role="textbox">Draft</div>
+      <button type="button" ${attributes}
+        aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Medium</button></form>
+      <div id="picker" role="menu" hidden><div data-model-picker-view="simple">
+        <div role="menuitem" data-model-picker-view-toggle="true" tabindex="0"><div data-menu-row-content>Medium</div></div>
+        <span id="status" role="status">6 Medium, 2 of 3.</span>
+        <div role="menuitem" tabindex="-1" aria-describedby="status"><div data-model-picker-power-slider style="height:30px;width:250px"></div></div>
+        <div id="models" hidden><div role="menuitemradio" aria-checked="true">6</div>
+          <div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div></div>
+      </div></div><script>
+        const control=document.querySelector('button'),menu=document.querySelector('#picker'),view=document.querySelector('[data-model-picker-view]');
+        const toggle=document.querySelector('[data-model-picker-view-toggle]'), models=document.querySelector('#models');
+        const labels=['Instant','Medium','High']; let family='6',value=1;
+        function render(){
+          document.querySelector('#status').textContent=family+' '+labels[value]+', '+(value+1)+' of 3.';
+          toggle.firstElementChild.textContent=(family==='6'?'':'5.6 Sol ')+(${repeatedVersion} ? family+' ' : '')+labels[value];
+          document.querySelector('[data-model-picker-power-slider]').innerHTML='<span data-orientation="horizontal" aria-disabled="false">'
+            +labels.map((_,i)=>'<span data-selected="'+(i<=value)+'"></span>').join('')
+            +'<span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="2" aria-valuenow="'+value+'"></span></span>';
+        }
+        control.onclick=()=>{menu.hidden=false;control.setAttribute('aria-expanded','true');render();};
+        toggle.onclick=()=>{view.setAttribute('data-model-picker-view','advanced');models.hidden=false;};
+        document.querySelectorAll('[role=menuitemradio]').forEach((radio,index)=>{radio.onclick=()=>{
+          family=index===0?'6':'5.6';
+          document.querySelectorAll('[role=menuitemradio]').forEach((el,i)=>el.setAttribute('aria-checked',String(i===index)));
+          models.hidden=true;view.setAttribute('data-model-picker-view','simple');render();
+        };});
+        document.addEventListener('keydown',e=>{
+          if(e.key==='Escape'){menu.hidden=true;control.setAttribute('aria-expanded','false');control.textContent=(family==='6'?'':'5.6 Sol ')+labels[value];}
+          if(e.key==='ArrowRight'||e.key==='ArrowLeft'){value+=e.key==='ArrowRight'?1:-1;render();e.preventDefault();}
+        });render();
+      </script>`);
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    const caps = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+    expect(await page.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).count()).toBe(1);
+    for (const [family, effort] of [["5.6", "low"], ["6", "high"], ["5.6", "medium"], ["6", "medium"]] as const) {
+      const selected = await worker.selectModelAndEffort(page, "gpt-5.6-sol", effort, caps, undefined, false, family);
+      expect(selected.modelFamily).toBe(family);
+      await worker.assertSelectedEffort(page, selected);
+      expect(await page.locator('[role=menuitemradio][aria-checked=true]').textContent()).toBe(family === "6" ? "6" : "GPT-5.6 Sol");
+      expect(await page.locator('[contenteditable]').innerText()).toBe("Draft");
+    }
+    const selected = await worker.selectModelAndEffort(page, "gpt-5.6-sol", "medium", caps, undefined, false, "6");
+    // An unchanged trigger must not conceal a different model in the menu.
+    await page.locator('[role=menuitemradio][aria-checked=true]').evaluate(node => { node.textContent = "GPT-6.1 Sol"; });
+    const wrongModel = await worker.assertSelectedEffort(page, selected).then(() => undefined, (error: unknown) => error);
+    expect(wrongModel).toMatchObject({ code: "model_version_unavailable", retryable: false });
+    await page.locator('[role=menuitemradio][aria-checked=true]').evaluate(node => { node.textContent = "6"; });
+    // Change the slider behind the closed trigger; pre-Send must read its real value.
+    await page.keyboard.press("ArrowRight");
+    const wrongEffort = await worker.assertSelectedEffort(page, selected).then(() => undefined, (error: unknown) => error);
+    expect(wrongEffort).toMatchObject({ code: "model_version_unavailable", retryable: false });
+    expect(await page.locator('[contenteditable]').innerText()).toBe("Draft");
+  } finally { await context.close(); }
+}, 30_000);
+
+// Reuse the dated five/six-position fixtures: the trigger and menu roll out independently.
+for (const variant of ["neutral", "inlineReasoning"] as const)
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("dated power and explicit pickers verify before Send with " + variant, async () => {
+  const context = await browser.newContext();
+  try {
+    for (const [fixture, effort, label] of [
+      ["power-2026-09-29", "max", "Pro"],
+      ["explicit-2026-10-28", "high", "6 Sol High"],
+      ["explicit-2026-10-28", "xhigh", "6 Sol Extra High"],
+      ["explicit-2026-10-28", "max", "6 Astra Max"],
+    ] as const) {
+      const page = await context.newPage();
+      const html = readFileSync(new URL("./fixtures/chatgpt-model-picker-" + fixture + ".html", import.meta.url), "utf8");
+      const config = fixture.startsWith("power")
+        ? '<script>window.pickerHeader = value => value === 4 ? "6" : "5.6"; window.pickerStatus = (effort, value) => effort + ", " + (value + 1) + " of 5.";</script>'
+        : "";
+      await page.setContent(config + html.replace('data-tone="neutral"', MODEL_CONTROLS[variant]));
+      expect(await page.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).count()).toBe(1);
+      const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+      const selected = await worker.selectModelAndEffort(page, "gpt-5.6-sol", effort, {
+        localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      }, undefined, false, "6");
+      expect(selected.selection.label).toBe(label);
+      await worker.assertSelectedEffort(page, selected);
+      expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
+      await page.close();
+    }
+  } finally { await context.close(); }
 }, 30_000);
 
 for (const scenario of ["hydrate", "shrink", "locked", "pro-disappears", "missing-pro"])
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keeps the requested available effort`, async () => {
-  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  const page = await browser.newPage();
   try {
-    const page = await browser.newPage();
     await page.setContent(`<form><div id="prompt-textarea" contenteditable="true">Draft</div>
       <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Instant</button></form>
       <div id="picker" role="menu" hidden><div role="menuitem" tabindex="0"><div data-model-picker-power-slider style="height:30px;width:250px"></div></div></div>
@@ -83,13 +216,78 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
         localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
       });
       if (scenario === "shrink") expect((await result).selection.label).toBe("Extra High");
-      else if (scenario === "missing-pro" || scenario === "pro-disappears") {
-        await expect(result).rejects.toMatchObject({
-          status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false,
-        });
-      } else await expect(result).rejects.toMatchObject({ retryable: false });
+      else {
+        // Await Playwright before asserting: Bun's async rejection matcher can stall its I/O.
+        const failure = await result.then(() => undefined, (error: unknown) => error);
+        expect(failure).toMatchObject({ retryable: false, ...((scenario === "missing-pro" || scenario === "pro-disappears") ? { status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable" } : {}) });
+      }
     }
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
     await page.close();
-  } finally { await browser.close(); }
+  } finally { await page.close(); }
 }, 120_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("Think uses the active editor in both composer layouts and survives its replacement", async () => {
+  const context = await browser.newContext();
+  const think = readFileSync(new URL("./fixtures/chatgpt-composer-think.html", import.meta.url), "utf8");
+  try {
+    const page = await context.newPage();
+    for (const modern of [false, true]) {
+      await page.setContent(`<div contenteditable="true" data-composer-markdown role="textbox">Unrelated editor</div>
+        <form data-chatgpt-composer>
+          <div ${modern ? 'data-composer-markdown role="textbox"' : 'id="prompt-textarea"'} contenteditable="true"><span data-id="plugin:fixture" data-keyword="Codex Native2" contenteditable="false">Codex Native2</span></div>
+          ${think}
+        </form><script>(()=>{
+          const button=document.querySelector('button');
+          button.onclick=()=>{
+            button.setAttribute('aria-pressed',String(button.getAttribute('aria-pressed')!=='true'));
+            const editor=document.querySelector('form [contenteditable="true"]');
+            editor.replaceWith(editor.cloneNode(true));
+          };
+        })();</script>`);
+      const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+      expect(await composer.count()).toBe(1);
+      await setChatGptThinkMode(composer, true);
+      expect(await page.getByRole("button", { name: "Think" }).getAttribute("aria-pressed")).toBe("true");
+      await setChatGptThinkMode(composer, false);
+      expect(await page.getByRole("button", { name: "Think" }).getAttribute("aria-pressed")).toBe("false");
+      expect(await composer.locator('[data-id="plugin:fixture"]').getAttribute("data-keyword")).toBe("Codex Native2");
+      expect(await page.locator('body > [contenteditable]').innerText()).toBe("Unrelated editor");
+    }
+  } finally { await context.close(); }
+}, 30_000);
+
+// Keep the real probe's full hydration budget; absence alone must never pass smoke.
+for (const recognizedThink of [true, false])
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`smoke requires positive Luna control evidence (Think=${recognizedThink})`, async () => {
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.setContent(`<form data-chatgpt-composer>
+      <div contenteditable="true" data-composer-markdown role="textbox">Draft</div>
+      ${recognizedThink ? '<button type="button" aria-pressed="false">Think</button>' : ''}
+    </form>`);
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    worker.config = { useSavedChats: false };
+    worker.ensurePage = async () => page;
+    worker.prepareChatSurface = async () => {};
+    worker.activeComposer = async () => page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+    let turns = 0;
+    worker.runBrowserTurn = async (options: any) => {
+      turns += 1;
+      expect(options.modelFamily).toBeUndefined();
+      expect(options.reasoning).toBe("low");
+      expect(options.capabilities).toEqual({
+        solAvailable: false, extraHighAvailable: false, proAvailable: false, localToolsEnabled: false,
+      });
+      return "CODEX WEB GPT READY";
+    };
+    if (recognizedThink) {
+      expect(await worker.smokeTestExclusive()).toMatchObject({ response: "CODEX WEB GPT READY" });
+      expect(turns).toBe(1);
+    } else {
+      await expect(worker.smokeTestExclusive()).rejects.toThrow("Could not identify ChatGPT's model controls");
+      expect(turns).toBe(0);
+    }
+  } finally { await context.close(); }
+}, 40_000);

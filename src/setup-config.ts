@@ -31,12 +31,15 @@ export interface SetupOptions {
   autoApproveToolCalls?: boolean;
   useEnhancedWebSessionMode?: boolean;
   experimentalBiggerContext?: boolean;
+  composerPredictionsEnabled?: boolean;
   experimentalSkillAttachments?: boolean;
+  experimentalPlusNativeContext?: boolean;
   experimentalNoAutoCompact?: boolean;
   experimentalFreshConversationPerTurn?: boolean;
   useSavedChats?: boolean;
   zeroRiskProEnabled?: boolean;
   replaceCodexRoute?: boolean;
+  preserveDisconnectedRoute?: boolean;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
@@ -55,7 +58,9 @@ export function launcherCapabilityProbeRequired(
     || existing?.browserHost !== "launcher"
     || typeof existing.solAvailable !== "boolean"
     || typeof existing.extraHighAvailable !== "boolean"
-    || typeof existing.proAvailable !== "boolean";
+    || typeof existing.proAvailable !== "boolean"
+    || !existing.modelCapabilities
+    || Date.now() - existing.modelCapabilities.observedAt > 30 * 60_000;
 }
 
 export function existingFullSetupCredentials(
@@ -101,6 +106,7 @@ export function buildSetupConfig(
     config.browserHost = "managed-chrome";
     delete config.browserHostDescriptorPath;
   }
+  if (options.composerPredictionsEnabled !== undefined) config.composerPredictionsEnabled = options.composerPredictionsEnabled;
   if (options.autoApproveToolCalls !== undefined) config.autoApproveToolCalls = options.autoApproveToolCalls;
   if (options.experimentalSkillAttachments !== undefined) {
     config.experimentalSkillAttachments = options.experimentalSkillAttachments;
@@ -125,6 +131,9 @@ export function buildSetupConfig(
       throw new Error("Bigger Context is unavailable while Enhanced Web session mode is enabled");
     }
     config.experimentalBiggerContext = options.experimentalBiggerContext;
+  }
+  if (options.experimentalPlusNativeContext !== undefined) {
+    config.experimentalPlusNativeContext = options.experimentalPlusNativeContext;
   }
   if (options.experimentalNoAutoCompact !== undefined) {
     config.experimentalNoAutoCompact = options.experimentalNoAutoCompact;

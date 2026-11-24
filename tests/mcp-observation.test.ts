@@ -4,7 +4,69 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import * as z from "zod/v4";
-import { observeMcpToolCalls } from "../src/adapters/chatgpt-web/mcp-observation";
+import { observeMcpToolCalls, subagentModelObservation } from "../src/adapters/chatgpt-web/mcp-observation";
+import { scopeHash } from "../src/adapters/chatgpt-web/mcp-request-diagnostics";
+
+test("overlapping MCP calls retain private cross-layer correlation through out-of-order replies", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const received: unknown[] = [], sent: unknown[] = [];
+  const transport: Transport = { start: async () => {}, close: async () => {},
+    onmessage: message => { received.push(message); }, send: async message => { sent.push(message); } };
+  observeMcpToolCalls(transport, new Set(["codex_tool_call"]), event => events.push(event));
+  const token = "turn_private_correlation_token_1234567890";
+  const requests = [7, "7"].map(id => ({ jsonrpc: "2.0" as const, id, method: "tools/call",
+    params: { name: "codex_tool_call", arguments: { turn_token: token,
+      wire_name: "codex.control.output", arguments: { kind: "final", text: "private-answer" } } } }));
+  for (const request of requests) transport.onmessage?.(request);
+  const replies = [...requests].reverse().map(request => ({ jsonrpc: "2.0" as const, id: request.id,
+    result: { isError: request.id === "7", content: [{ type: "text", text: "private-reply" }] } }));
+  for (const reply of replies) await transport.send(reply);
+  expect(received).toEqual(requests);
+  expect(sent).toEqual(replies);
+  expect(events.map(event => event.call)).toEqual([1, 2, 2, 1]);
+  for (const event of events) {
+    expect(event.reference_hash).toBe(scopeHash(token));
+    expect(Number.isFinite(Date.parse(String(event.at)))).toBeTrue();
+    expect(event.request_hash).toBe(scopeHash(event.call === 1 ? "number:7" : "string:7"));
+  }
+  expect(events[2]).toMatchObject({ is_error: true });
+  for (const secret of [token, "private-answer", "private-reply"]) expect(JSON.stringify(events)).not.toContain(secret);
+});
+
+test("inventory observations correlate literal queries without disclosing their content", () => {
+  const events: Array<Record<string, unknown>> = [];
+  const transport: Transport = { start: async () => {}, close: async () => {}, send: async () => {} };
+  observeMcpToolCalls(transport, new Set(["codex_tool_inventory"]), event => events.push(event));
+  const query = "private-inventory-query";
+  for (const [id, args] of [{ query }, {}, { query: { private: true } }, { query: query.repeat(100) }].entries()) {
+    transport.onmessage?.({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "codex_tool_inventory", arguments: args } });
+  }
+  expect(events[0]).toMatchObject({ inventory_query_kind: "string", query_hash: scopeHash(query), query_chars: query.length });
+  expect(events[1]).toMatchObject({ inventory_query_kind: "missing" });
+  expect(events[2]).toMatchObject({ inventory_query_kind: "unrecognized" });
+  expect(events[3]).not.toHaveProperty("query_hash");
+  expect(JSON.stringify(events)).not.toContain("private");
+});
+
+test("subagent diagnostics distinguish an explicit model without exposing task arguments", () => {
+  const privateText = "private task /Users/example/work sk-not-a-model";
+  const args = { model: "chatgpt-web/gpt-5.6-sol", message: privateText, items: [{ text: privateText }] };
+  const before = structuredClone(args);
+  expect(subagentModelObservation("multi_agent_v1__spawn_agent", args)).toEqual({
+    modelOverride: "explicit", requestedModel: "chatgpt-web/gpt-5.6-sol",
+  });
+  expect(args).toEqual(before);
+  expect(subagentModelObservation("multi_agent_v1__spawn_agent", { message: privateText })).toEqual({ modelOverride: "omitted" });
+  expect(subagentModelObservation("multi_agent_v2__spawn_agent", { model: "gpt-6-luna" })).toEqual({
+    modelOverride: "explicit", requestedModel: "gpt-6-luna",
+  });
+  for (const model of [privateText, "https://private.test/key", "sk-private-key", null, {}, "gpt-" + "a".repeat(100)]) {
+    expect(subagentModelObservation("multi_agent_v1__spawn_agent", { model })).toEqual({ modelOverride: "unrecognized" });
+  }
+  expect(subagentModelObservation("other__spawn_agent", args)).toBeUndefined();
+  expect(subagentModelObservation("exec_command", args)).toBeUndefined();
+  expect(JSON.stringify(subagentModelObservation("multi_agent_v1__spawn_agent", args))).not.toContain(privateText);
+});
 
 test("Native final observations separate handler time from transport write without exposing payload", async () => {
   const events: Array<Record<string, unknown>> = [];
@@ -32,6 +94,7 @@ test("Native final observations separate handler time from transport write witho
 });
 
 test.each([null, "private-invalid-value", { wire_name: "private-other-control", arguments: { kind: "final" } },
+  { turn_token: "private-token".repeat(100) }, { turn_token: { private_key: "private-value" } },
   { wire_name: "codex.control.output", arguments: null },
   { wire_name: "codex.control.output", arguments: { kind: "private-invalid-kind" } },
 ])("unvalidated payloads cannot leak into output timing labels", async args => {
@@ -42,6 +105,7 @@ test.each([null, "private-invalid-value", { wire_name: "private-other-control", 
   await transport.send({ jsonrpc: "2.0", id: 1, result: {} });
   expect(events).toHaveLength(2);
   expect(events.every(event => !("output_kind" in event))).toBeTrue();
+  expect(events.every(event => !("reference_hash" in event))).toBeTrue();
   expect(JSON.stringify(events)).not.toContain("private");
 });
 

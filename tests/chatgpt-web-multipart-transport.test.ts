@@ -60,13 +60,16 @@ test("Bigger Context expands only the total ceiling and preserves per-message bo
     { localToolsEnabled: false, solAvailable: false, proAvailable: false },
     40_000,
     2,
-  )).toThrow("unavailable for Luna");
+  )).not.toThrow();
 });
 
 test("Bigger Context selects the cheapest account mode that can carry every stage", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
-  expect(resolveChatGptWebMultipartStagingMode(CHATGPT_WEB_MODEL_ID, plus, 30_000, 200_000).effort)
+  expect(resolveChatGptWebMultipartStagingMode(CHATGPT_WEB_MODEL_ID, plus, 10_000, 100_000).effort)
     .toBe("low");
+  // Plus Instant stages reserve upstream headroom for the subsequent request.
+  expect(resolveChatGptWebMultipartStagingMode(CHATGPT_WEB_MODEL_ID, plus, 30_000, 200_000).effort)
+    .toBe("medium");
   expect(resolveChatGptWebMultipartStagingMode(CHATGPT_WEB_MODEL_ID, pro, 100_000, 500_000).effort)
     .toBe("low");
   expect(resolveChatGptWebMultipartStagingMode(CHATGPT_WEB_MODEL_ID, pro, 104_000, 1_200_000).effort)
@@ -120,7 +123,7 @@ test("large Bigger Context stage reaches the verified direct attachment route by
       stages.push({ text, direct });
     },
     sendAttachedPrompt: async () => "user_turn",
-    waitForNewAssistantTurn: async () => ({}),
+    waitForNewAssistantTurn: async () => ({ identity: "multipart_stage" }),
     waitForMultipartAcknowledgement: async () => {},
     attachPromptWithCompactionRetry: async (...args: unknown[]) => {
       final = { text: args[1] as string, direct: args[10] as boolean };

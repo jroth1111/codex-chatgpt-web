@@ -305,6 +305,9 @@ export class LauncherBrowserHelperClient {
             }
           });
       }
+      else if (message.event === "generation_progress") {
+        this.invokeEventCallback(message.id, pending, () => pending.turn.onGenerationProgress?.());
+      }
       else if (message.event === "heartbeat") {
         this.invokeEventCallback(message.id, pending, () => pending.turn.onHeartbeat?.());
       }
@@ -359,8 +362,10 @@ export class LauncherBrowserHelperClient {
                   prepared: {
                     text: prepared.text,
                     images: prepared.images,
+                    ...(prepared.turnToken ? { turnToken: prepared.turnToken } : {}),
                     ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
                     ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
+                    ...(prepared.contextTokenBreakdown ? { contextTokenBreakdown: prepared.contextTokenBreakdown } : {}),
                     ...(prepared.modelInputText ? { modelInputText: prepared.modelInputText } : {}),
                     ...(prepared.transport ? { transport: prepared.transport } : {}),
                     ...(prepared.inlineChars !== undefined ? { inlineChars: prepared.inlineChars } : {}),

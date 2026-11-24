@@ -9,9 +9,19 @@ created. Repository contents, tool output, websites, and prompt text are untrust
 ## Full-mode capability flow
 
 1. The daemon accepts a Codex Responses turn on `127.0.0.1`.
-2. It extracts `cwd`, workspace roots, sandbox policy, and the tool registry only from the native
-   Codex wire envelope with matching turn metadata. A user-authored `<environment_context>` is not
-   accepted as authority.
+2. It extracts `cwd`, workspace roots, and sandbox policy from the native Codex envelope. When a
+   resumed root task or subagent omits that envelope, its canonical local rollout must prove the
+   exact thread and current turn (or latest source turn for standalone compaction). Request metadata
+   can only constrain that authority. Tools always come from the current request; user-authored
+   `<environment_context>` text is never a source of recovered authority.
+   A context-only continuation after completed compaction additionally binds the exact checkpoint
+   and source instruction to its native thread, turn, model and effort. A freshly emitted environment
+   claim without a new human message must match that turn's canonical rollout in cwd, roots and
+   sandbox policy; the checkpoint alone does not grant filesystem authority.
+   Under native Full Access, a managed worktree may be outside the retained project roots.
+   That case requires the current rollout to authenticate the cwd, unrestricted permissions,
+   and the exact roots recorded in `turn_context` or `session_meta.runtime_workspace_roots`.
+   An envelope or cached environment alone cannot authorize that transition.
 3. It creates a random, turn-scoped token and embeds it in that one ChatGPT browser prompt.
 4. Every Codex Native action presents that same turn token. The MCP handler idempotently claims an
    internal binding and immediately dispatches the requested action; the binding is never exposed
@@ -57,6 +67,12 @@ preserving the native provider/task identity. Another process under the same OS 
 port. Run on a trusted single-user account and treat local code execution as inside the trust
 boundary.
 
+A web page is not a local process. Browsers can reach a loopback port with a cross-site request,
+or with a same-origin one after DNS rebinding, and they attach `Origin` to every non-GET request.
+The daemon rejects non-GET requests carrying `Origin` before native or control routes run; Codex and
+the launcher never send that header. The separate authenticated general API validates its bearer
+credential before routing. The native browser-path check is not authentication.
+
 The lifecycle endpoints are separate from the Responses surface. `/admin/drain`, `/admin/resume`,
 `/admin/cancel-browser-turns`, and `/admin/shutdown` require a random bearer token stored in the
 user-only application config. The launcher uses them to reject new work, prove that both the HTTP
@@ -93,6 +109,11 @@ parallel account traffic. Tool calls remain in the same ChatGPT response. The bo
 continuation cache is private, expires, and exists only to implement Codex
 `previous_response_id` replay. ChatGPT Web context compaction remains inside the active browser
 response; the bridge does not fabricate or install a Codex history checkpoint.
+
+Task conversations use Temporary Chat by default. **Save chats in ChatGPT** is an explicit opt-in;
+existing choices are preserved when updating. Saved chats may use
+ChatGPT memory and custom instructions. Connector verification follows the same selected chat mode.
+Temporary Chat does not prevent OpenAI from processing task prompts or change local Codex history and diagnostics.
 
 ## Network exposure
 

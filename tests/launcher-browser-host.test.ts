@@ -7,6 +7,9 @@ import {
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_BROWSER_IDLE_URL,
   LauncherBrowserTurnCancelledError,
+  LauncherBrowserTurnOwnerLostError,
+  LauncherRetainedConversationUnavailableError,
+  endLauncherManualTurn,
   inspectLauncherBrowserHost,
   notifyLauncherTurn,
   readLauncherBrowserHostDescriptor,
@@ -16,8 +19,63 @@ import {
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptStartupPagePool } from "../src/adapters/chatgpt-web/startup-page-pool";
 
 const roots: string[] = [];
+
+test("owner loss keeps its non-retryable classification when startup cleanup also fails", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    return Response.json({ code: "turn_owner_lost", error: "running helper exited" }, { status: 409 });
+  } });
+  const prior = process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS;
+  process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS = "1";
+  const pool = new ChatGptStartupPagePool<any>();
+  const cleanupError = new Error("startup cleanup failed");
+  let acknowledged = false;
+  try {
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      startupPages: pool,
+      runBrowserTurn: async () => { throw new Error("must not resubmit running turn"); },
+    });
+    const turn = { traceId: "lost-owner-cleanup", modelId: "gpt-5.6-sol", reasoning: "high",
+      modelFamily: "5.6", nativeConnector: true, allowStartupPreparation: true,
+      capabilities: { localToolsEnabled: true, solAvailable: true } };
+    await pool.prime(worker.startupPageKey(turn), "Harness", async () => ({ surfaceId: "a".repeat(32),
+      prefix: "Harness", pauseHeartbeat() {}, release: async () => { if (!acknowledged) throw cleanupError; } }));
+    const failure = await worker.runExclusive(turn).catch((error: Error) => error);
+    expect(failure).toMatchObject({ status: 409, code: "browser_turn_owner_lost", retryable: false });
+    expect(failure.cause).toBeInstanceOf(AggregateError);
+    expect(failure.cause.errors).toContain(cleanupError);
+    await expect(pool.cancel()).rejects.toBe(cleanupError);
+  } finally {
+    acknowledged = true; await pool.cancel();
+    if (prior === undefined) delete process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS;
+    else process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS = prior;
+    server.stop(true);
+  }
+});
+
+test("a lost running launcher owner never reaches browser submission or retry", async () => {
+  let acquisitions = 0;
+  let submissions = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    acquisitions++;
+    return Response.json({ code: "turn_owner_lost", error: "running helper exited" }, { status: 409 });
+  } });
+  try {
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      runBrowserTurn: async () => { submissions++; },
+    });
+    await expect(worker.runExclusive({ traceId: "lost-owner", modelId: "gpt-5.6-sol", reasoning: "high",
+      capabilities: { localToolsEnabled: false, solAvailable: true } })).rejects.toMatchObject({
+      status: 409, code: "browser_turn_owner_lost", retryable: false,
+    });
+    expect(acquisitions).toBe(1);
+    expect(submissions).toBe(0);
+  } finally { server.stop(true); }
+});
 
 test("claimed startup cleanup failure still settles the newly acquired real turn", async () => {
   const events: Array<{ phase: string; traceId: string }> = [];
@@ -30,17 +88,25 @@ test("claimed startup cleanup failure still settles the newly acquired real turn
   } });
   const prior = process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS;
   process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS = "1";
+  const pool = new ChatGptStartupPagePool<any>();
+  let acknowledged = false;
   try {
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
       config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
-      startupPages: { take: () => ({ surfaceId: "a".repeat(32), release: async () => { throw new Error("startup cleanup failed"); } }) },
+      startupPages: pool,
       runBrowserTurn: async () => { throw new Error("must not run after failed cleanup"); },
     });
-    await expect(worker.runExclusive({ traceId: "claim-cleanup", modelId: "gpt-5.6-sol", reasoning: "high",
+    const turn = { traceId: "claim-cleanup", modelId: "gpt-5.6-sol", reasoning: "high",
       modelFamily: "5.6", nativeConnector: true, allowStartupPreparation: true,
-      capabilities: { localToolsEnabled: true, solAvailable: true } })).rejects.toThrow("startup cleanup failed");
+      capabilities: { localToolsEnabled: true, solAvailable: true } };
+    await pool.prime(worker.startupPageKey(turn), "Harness", async () => ({ surfaceId: "a".repeat(32),
+      prefix: "Harness", pauseHeartbeat() {}, release: async () => { if (!acknowledged) throw new Error("startup cleanup failed"); } }));
+    await expect(worker.runExclusive(turn)).rejects.toThrow("startup cleanup failed");
     expect(events.filter(e => e.phase === "end" && e.traceId === "claim-cleanup")).toHaveLength(1);
+    await expect(pool.cancel()).rejects.toThrow("startup cleanup failed");
+    acknowledged = true; await pool.cancel();
   } finally {
+    acknowledged = true; await pool.cancel();
     if (prior === undefined) delete process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS;
     else process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS = prior;
     server.stop(true);
@@ -335,6 +401,62 @@ test("launcher turn control preserves explicit user cancellation as a terminal s
   }
 });
 
+test("launcher turn control preserves a missing retained conversation as a typed signal", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(409, { "content-type": "application/json" });
+    response.end('{"error":"retained source missing","code":"retained_conversation_unavailable"}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    const error = await notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "missing123456",
+      helperPid: process.pid,
+      conversationKey: "a".repeat(64),
+      requireRetainedConversation: true,
+    }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LauncherRetainedConversationUnavailableError);
+    expect(error.message).toContain("retained source missing");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher turn control preserves a lost running helper as a typed signal", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(409, { "content-type": "application/json" });
+    response.end('{"error":"running helper exited","code":"turn_owner_lost"}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    const error = await notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "missing123456",
+      helperPid: process.pid,
+      conversationKey: "a".repeat(64),
+      requireRetainedConversation: true,
+    }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LauncherBrowserTurnOwnerLostError);
+    expect(error.message).toContain("running helper exited");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -345,10 +467,10 @@ test("launcher session verification uses the authenticated control channel inste
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      temporary: true,
+      newChat: true,
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -365,7 +487,7 @@ test("launcher session verification uses the authenticated control channel inste
       composer: true,
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -454,7 +576,7 @@ function nativeTargetContext(pages: Page[], targetId: (page: Page) => string): B
 test("launcher page selection uses native ownership without evaluating unrelated renderers", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const hiddenPage = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: () => { throw new Error("Do not evaluate an unrelated renderer"); },
   } as unknown as Page;
   const ownedPage = {

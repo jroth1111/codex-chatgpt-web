@@ -8,6 +8,7 @@ import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 function fixture(
   openWith: "click" | "pointerdown" | "none" | "hidden-slider",
   ignoredEscapeCalls: ReadonlySet<number> = new Set(),
+  closeDelayMs = 0,
 ) {
   let opened = false;
   let expanded = openWith === "hidden-slider";
@@ -80,7 +81,10 @@ function fixture(
     },
     keyboard: { press: async (key: string) => {
       events.push(key);
-      if (key === "Escape" && !ignoredEscapeCalls.has(++escapeCalls)) expanded = false;
+      if (key === "Escape" && !ignoredEscapeCalls.has(++escapeCalls)) {
+        if (closeDelayMs) setTimeout(() => { expanded = false; }, closeDelayMs);
+        else expanded = false;
+      }
     } },
   };
   return { page, control, owned, slider, events, clickOptions };
@@ -92,7 +96,7 @@ test("effort activation returns the menu owned by the clicked control", async ()
   expect(result.method).toBe("click");
   expect(result.menu).toBe(f.owned as never);
   expect(f.events).toEqual(["click"]);
-  expect(f.clickOptions).toEqual([{ force: true, timeout: 1 }]);
+  expect(f.clickOptions).toEqual([{ timeout: 1 }]);
 });
 
 test("a ghost click is reset before a single primary pointerdown fallback", async () => {
@@ -101,6 +105,28 @@ test("a ghost click is reset before a single primary pointerdown fallback", asyn
   expect(result.method).toBe("pointerdown");
   expect(result.menu).toBe(f.owned as never);
   expect(f.events).toEqual(["click", "Escape", "pointerdown"]);
+});
+
+test("a committed owned menu survives a delayed click acknowledgement", async () => {
+  const f = fixture("click");
+  const click = f.control.click;
+  f.control.click = async options => {
+    await click(options);
+    throw Object.assign(new Error("click acknowledgement timed out"), { name: "TimeoutError" });
+  };
+  const result = await activateChatGptEffortMenu(f.page as never, f.control as never);
+  expect(result.method).toBe("click");
+  expect(result.menu).toBe(f.owned as never);
+  expect(f.events).toEqual(["click"]);
+});
+
+test.each(["TimeoutError", "AbortError"])("an unproven click or cancellation preserves its original %s", async name => {
+  const f = fixture(name === "TimeoutError" ? "none" : "click");
+  const click = f.control.click;
+  const error = Object.assign(new Error("click failed"), { name });
+  f.control.click = async options => { await click(options); throw error; };
+  await expect(activateChatGptEffortMenu(f.page as never, f.control as never)).rejects.toBe(error);
+  expect(f.events).toEqual(["click"]);
 });
 
 test("activation fails closed when no owned menu or slider surface appears", async () => {
@@ -172,4 +198,19 @@ test.each([false, true])("activation failure retains structured error classifica
   })).rejects.toMatchObject(limited
     ? { status: 429, code: "rate_limit_exceeded", retryable: false }
     : { status: 502, code: "upstream_server_error", retryable: true });
+});
+
+// The original French delayed-close regression also exercises the current official close path.
+test("model selection waits for both delayed menu closes before accepting the effort", async () => {
+  const f = fixture("click", new Set(), 600);
+  f.control.innerText = async () => await f.control.getAttribute("aria-expanded") === "true" ? "Effort de réflexion" : "Moyen";
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => ({ isEditable: async () => true, locator: () => ({ locator: () => f.control }) }),
+  });
+  const mode = await worker.selectModelAndEffort(f.page, CHATGPT_WEB_MODEL_ID, "medium", {
+    localToolsEnabled: true, solAvailable: true, proAvailable: true,
+  });
+  expect(mode.selection.label).toBe("Moyen");
+  expect(await f.control.getAttribute("aria-expanded")).toBe("false");
+  expect(f.events).toEqual(["click", "Escape", "click", "Escape"]);
 });

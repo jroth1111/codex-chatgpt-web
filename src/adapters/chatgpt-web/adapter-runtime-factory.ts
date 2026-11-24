@@ -31,6 +31,8 @@ import {
   type ChatGptTurnRuntime,
 } from "./turn-execution";
 import { resolveBiggerContextMultipartParts, resolveEnhancedRecoveryMultipartParts } from "./usage";
+import { withCompactionInactivity } from "./compaction-inactivity";
+import { MAX_COMPACTION_HANDOFF_TIMEOUT_MS } from "./compaction-handoff";
 
 interface ChatGptRuntimeFactoryOptions {
   provider: CodexProviderConfig;
@@ -94,7 +96,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void; compactionControlInstruction?: string } = {},
+    hooks: { onCompactionProgress?: (kind?: "generation" | "submitted" | "multipart_acknowledged", part?: number) => void; compactionControlInstruction?: string } = {},
   ): ChatGptTurnRuntime => {
     const toolPolicy = effectiveChatGptToolPolicy(parsed);
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
@@ -111,7 +113,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
     const identity = extractChatGptTurnIdentity(parsed);
     const parallelAdmission = provider.chatgptWeb?.experimentalParallelSubagents
       ? parallelAdmissionIdentity(parsed, executionNamespace) : undefined;
-    const captureLunaCheckpoint = !finalizationOnly && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !browserCompaction && Boolean(identity.threadId && identity.turnId);
+    const captureLunaCheckpoint = !experimentalBiggerContext && !finalizationOnly && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !browserCompaction && Boolean(identity.threadId && identity.turnId);
     const captureEnhancedCheckpoint = useEnhancedWebSessionMode
       && provider.chatgptWeb?.experimentalNoAutoCompact === true
       && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID && !browserCompaction && !finalizationOnly;
@@ -119,7 +121,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       : captureEnhancedCheckpoint ? enhancedRecoveryCheckpointStore.apply(parsed)
       : { parsed, applied: false };
     const experimentalMultipartParts = experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities, experimentalSkillAttachments)
+      ? resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities, experimentalSkillAttachments, provider.chatgptWeb?.appName)
       : useEnhancedWebSessionMode && finalizationOnly
         ? resolveEnhancedRecoveryMultipartParts(checkpointInput.parsed, turnCapabilities, experimentalSkillAttachments)
       : undefined;
@@ -132,6 +134,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       multipart: experimentalMultipartParts !== undefined,
     });
     const compileOptions = {
+      appName: provider.chatgptWeb?.appName,
       captureLunaCheckpoint,
       ...(experimentalSkillAttachments ? { experimentalSkillAttachments: true } : {}),
       nativeControlConnector,
@@ -150,7 +153,11 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       if (capturedCheckpoint) { checkpointCaptureError = new Error("ChatGPT Luna emitted more than one rolling checkpoint"); return; }
       capturedCheckpoint = captured;
     };
-    const finalizeCheckpoint = (browser: Promise<string>): Promise<string> => browser.then(answer => {
+    // Structured Enhanced handoffs own their timer; local compaction uses the factory timer.
+    const finalizeCheckpoint = (browser: Promise<string>): Promise<string> => (browserCompaction && (!useEnhancedWebSessionMode || parsed._compactionRequest !== true)
+      ? withCompactionInactivity(browser, trace, Math.min(timeoutMs ?? MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+          MAX_COMPACTION_HANDOFF_TIMEOUT_MS), error => browserAbort.abort(error))
+      : browser).then(answer => {
       if (!captureLunaCheckpoint) return answer;
       if (checkpointCaptureError) throw checkpointCaptureError;
       if (capturedCheckpoint) lunaCheckpointStore.commit(parsed, capturedCheckpoint, answer);
@@ -215,10 +222,14 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       : steering
         ? browserSteeringRetry(steering, traceId, evidenceRetry, takeBrokerSteering, isClaudeClientSession(checkpointInput.parsed))
         : lunaSafetyRetry ?? evidenceRetry;
-    const retryPromptForAnswer = !finalizationOnly && taskAnswerRetry ? (answer: string, attempt: number) => (
-      chatGptTurnSessions.find(runtimeExecutionKey)?.runtime.compactionRequested
-        ? undefined : taskAnswerRetry(answer, attempt)
-    ) : undefined;
+    const retryPromptForAnswer = !finalizationOnly && taskAnswerRetry ? async (answer: string, attempt: number) => {
+      if (chatGptTurnSessions.find(runtimeExecutionKey)?.runtime.compactionRequested) return undefined;
+      const retry = await taskAnswerRetry(answer, attempt);
+      if (!retry || !activeToken || browserCompaction) return retry;
+      // Each replacement prompt must carry the prepared work identity, including corrections and steering.
+      const binding = `\n<codex_native_turn_binding>\nturn_token ${activeToken}\n</codex_native_turn_binding>`;
+      return typeof retry === "string" ? retry + binding : { ...retry, text: retry.text + binding };
+    } : undefined;
     const retryPromptForError = finalizationOnly ? undefined
       : createChatGptSameSurfaceRetry({
           traceId,
@@ -268,7 +279,8 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
         onReasoningSummary: (value, continuation) => trace.push({ kind: "reasoning", text: value, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: emitCommentary,
         onHeartbeat: () => trace.signalProgress(),
-        onProgress: () => trace.signalProgress(),
+        onProgress: () => { trace.recordProgress(); hooks.onCompactionProgress?.(); },
+        onGenerationProgress: () => trace.signalProgress(),
         beginFinalizationOnly: async expectedActivityRevision => {
           const started = activeToken
             ? await brokerOwner.beginFinalizationOnly(activeToken, expectedActivityRevision)
@@ -287,11 +299,11 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
           ? await brokerOwner.armFinalizationOutput(activeToken, expectedActivityRevision)
           : false,
         onSendActivated: () => { submission.phase = "send_activated"; },
-        onSubmitted: () => { submission.phase = "accepted"; hooks.onCompactionProgress?.(); },
+        onSubmitted: () => { submission.phase = "accepted"; hooks.onCompactionProgress?.("submitted"); },
         onModelReceipt: logChatGptModelReceipt,
         onModelReceiptDiagnostic: logChatGptModelReceiptDiagnostic,
-        ...(hooks.onCompactionProgress ? { onMultipartStageAcknowledged: hooks.onCompactionProgress } : {}),
-        onTextDelta: delta => text.push(delta),
+        ...(hooks.onCompactionProgress ? { onMultipartStageAcknowledged: (part: number) => hooks.onCompactionProgress?.("multipart_acknowledged", part) } : {}),
+        onTextDelta: delta => { text.push(delta); if (delta) { trace.recordProgress(); hooks.onCompactionProgress?.(); } },
         ...(retryPromptForAnswer ? { retryPromptForAnswer } : {}),
         ...(retryPromptForError ? { retryPromptForError } : {}),
         ...(finalAnswerAdmission ? { finalAnswerAdmission } : {}),
@@ -300,6 +312,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       return {
         mode: "read-only",
         browser,
+        physicalSettlement: browserRun.then(() => undefined, () => undefined),
         trace,
         text, conversationKey,
         ...(steering ? { steering } : {}),
@@ -319,14 +332,14 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
         traceId,
         () => {
-          trace.signalProgress();
+          trace.recordProgress();
           externalProgress.recordBrokerActivity();
         },
-        tunneledOutput,
+        tunneledOutput && parsed._composerPrediction?.enabled ? { predictions: true } : tunneledOutput,
       );
       try {
         const prepared = await prepareChatGptWebContext(broker,
-          compileChatGptWebPrompt(input, turnCapabilities, turnToken, compileOptions),
+          compileChatGptWebPrompt(input, turnCapabilities, turnToken, { ...compileOptions, includeContextTokenBreakdown: true }),
           useEnhancedWebSessionMode, contextTtlMs, traceId);
         if (activeToken !== turnToken) {
           activeToken = turnToken;
@@ -348,6 +361,7 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
         throw failure;
       }
     };
+    let predictedFinal: { text: string; suggestion: string | null | undefined } | undefined;
     const browserRun = worker.run({
       traceId,
       ...(parallelAdmission ? { parallelAdmission } : {}),
@@ -370,12 +384,16 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
         commit: async revision => brokerOwner.commitCompletionFence(activeToken ?? await token.promise, revision),
       },
       ...(tunneledOutput ? { tunneledOutput: {
-        next: async (afterSequence: number, signal?: AbortSignal) => brokerOwner.nextOutput(
-          activeToken ?? await token.promise, afterSequence, signal,
-        ),
-        reset: async (finalSequence: number) => brokerOwner.resetOutput(
-          activeToken ?? await token.promise, finalSequence,
-        ),
+        next: async (afterSequence: number, signal?: AbortSignal) => {
+          const event = await brokerOwner.nextOutput(activeToken ?? await token.promise, afterSequence, signal);
+          if (event.kind === "final") predictedFinal = { text: event.text, suggestion: event.nextMessagePrediction };
+          return event;
+        },
+        reset: async (finalSequence: number) => {
+          predictedFinal = undefined;
+          if (parsed._composerPrediction) delete parsed._composerPrediction.suggestion;
+          return brokerOwner.resetOutput(activeToken ?? await token.promise, finalSequence);
+        },
         seal: async (afterSequence: number, expectedRevision: number) => brokerOwner.sealOutput(
           activeToken ?? await token.promise, afterSequence, expectedRevision,
         ),
@@ -384,7 +402,8 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
       onReasoningSummary: (value, continuation) => trace.push({ kind: "reasoning", text: value, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: emitCommentary,
       onHeartbeat: () => trace.signalProgress(),
-      onProgress: () => trace.signalProgress(),
+      onProgress: () => { trace.recordProgress(); hooks.onCompactionProgress?.(); },
+      onGenerationProgress: () => trace.signalProgress(),
       beginFinalizationOnly: async expectedActivityRevision => {
         const started = activeToken
           ? await brokerOwner.beginFinalizationOnly(activeToken, expectedActivityRevision)
@@ -403,23 +422,26 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
         ? await brokerOwner.armFinalizationOutput(activeToken, expectedActivityRevision)
         : false,
       onSendActivated: () => { submission.phase = "send_activated"; },
-      onSubmitted: () => { submission.phase = "accepted"; hooks.onCompactionProgress?.(); },
-      onModelReceipt: logChatGptModelReceipt,
-      onModelReceiptDiagnostic: logChatGptModelReceiptDiagnostic,
-        ...(hooks.onCompactionProgress ? { onMultipartStageAcknowledged: hooks.onCompactionProgress } : {}),
-      onTextDelta: delta => text.push(delta),
+      onSubmitted: () => { submission.phase = "accepted"; hooks.onCompactionProgress?.("submitted"); },
+        onModelReceipt: logChatGptModelReceipt,
+        onModelReceiptDiagnostic: logChatGptModelReceiptDiagnostic,
+        ...(hooks.onCompactionProgress ? { onMultipartStageAcknowledged: (part: number) => hooks.onCompactionProgress?.("multipart_acknowledged", part) } : {}),
+      onTextDelta: delta => { text.push(delta); if (delta) { trace.recordProgress(); hooks.onCompactionProgress?.(); } },
       ...(retryPromptForAnswer ? { retryPromptForAnswer } : {}),
       ...(retryPromptForError ? { retryPromptForError } : {}),
       ...(captureLunaCheckpoint ? { captureLunaCheckpoint: true, onLunaCheckpoint: captureCheckpoint } : {}),
     });
-    const trackedRun = browserRun.finally(() => { browserOwnerSettled = true; });
+    const trackedRun = browserRun.then(answer => {
+      if (parsed._composerPrediction && predictedFinal?.text === answer) {
+        parsed._composerPrediction.suggestion = predictedFinal.suggestion;
+        parsed._composerPrediction.completedAt ??= Date.now();
+      }
+      return answer;
+    }).finally(() => { browserOwnerSettled = true; });
     const browser = finalizeCheckpoint(toolPolicy.requireTool ? trackedRun.then(answer => {
       assertChatGptToolRequirementSatisfied(toolPolicy, toolResultDelivered); return answer;
     }) : trackedRun);
-    void browser.catch(error => {
-      const reason = error instanceof Error ? error : new Error(String(error));
-      setTimeout(() => activeToken && void Promise.resolve(brokerOwner.revoke(activeToken, reason)).catch(() => {}), 0);
-    });
+    void browser.catch(() => setTimeout(() => activeToken && void Promise.resolve(brokerOwner.revoke(activeToken)).catch(() => {}), 0));
     void browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
@@ -428,6 +450,11 @@ export function createChatGptRuntimeStarter(options: ChatGptRuntimeFactoryOption
     });
     return {
       mode: "tools",
+      physicalSettlement: browserRun.then(() => undefined, () => undefined),
+      ...(useEnhancedWebSessionMode && !browserCompaction && !isClaudeClientSession(parsed) && brokerOwner.setObserverConnected ? {
+        setObserverConnected: (connected: boolean) => activeToken
+          ? brokerOwner.setObserverConnected!(activeToken, connected) : false,
+      } : {}),
       token: token.promise,
       browser,
       trace,

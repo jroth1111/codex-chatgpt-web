@@ -23,7 +23,9 @@ const DEFAULT_STATE = Object.freeze({
   automaticWebSessionLimitCount: 15,
   automaticWebSessionLimitMinutes: 300,
   experimentalBiggerContext: false,
+  composerPredictionsEnabled: false,
   experimentalSkillAttachments: false,
+  experimentalPlusNativeContext: false,
   experimentalNoAutoCompact: false,
   experimentalPreparedWebSession: false,
   keepRunningOnClose: true,
@@ -60,6 +62,7 @@ function readState(filePath) {
         : false;
     }
     delete state.useNewCompactMode;
+    delete state.useTemporaryChats;
     if (parsed.coreSetupComplete === true
       && parsed.codexSetupComplete === undefined
       && parsed.claudeSetupComplete === undefined) {
@@ -80,7 +83,9 @@ function readState(filePath) {
       "useEnhancedOutputTunnel",
       "automaticWebSessionLimitEnabled",
       "experimentalBiggerContext",
+      "composerPredictionsEnabled",
       "experimentalSkillAttachments",
+      "experimentalPlusNativeContext",
       "experimentalNoAutoCompact",
       "experimentalPreparedWebSession",
       "keepRunningOnClose",
@@ -171,6 +176,7 @@ function createStateStore(filePath) {
     },
     update(patch) {
       const next = normalizeContextModes({ ...state, ...patch, version: 1 });
+      delete next.useTemporaryChats;
       writeState(filePath, next);
       state = next;
       return structuredClone(next);

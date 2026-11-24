@@ -10,6 +10,76 @@ const {
   validateSidebarState,
 } = require("../electron/state.cjs");
 
+test("prediction setting defaults off and preserves the explicit preference", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-prediction-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().composerPredictionsEnabled, false);
+    assert.equal(store.update({ composerPredictionsEnabled: true }).composerPredictionsEnabled, true);
+    assert.equal(createStateStore(file).read().composerPredictionsEnabled, true);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, composerPredictionsEnabled: true, language: "ja" }));
+    const restored = createStateStore(file).read();
+    assert.equal(restored.composerPredictionsEnabled, true);
+    assert.equal(restored.language, "ja");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("saved chats default off for new or missing settings and preserve explicit choices", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-saved-chat-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    assert.equal(createStateStore(file).read().useSavedChats, false);
+    fs.writeFileSync(file, JSON.stringify({ version: 1 }));
+    const store = createStateStore(file);
+    assert.equal(store.read().useSavedChats, false);
+    store.update({ useSavedChats: true });
+    assert.equal(createStateStore(file).read().useSavedChats, true);
+    store.update({ useSavedChats: false });
+    assert.equal(createStateStore(file).read().useSavedChats, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("parallel Temporary settings are discarded without inverting explicit saved-chat choices", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-chat-state-compat-"));
+  const file = path.join(root, "state.json");
+  try {
+    const original = createStateStore(file).update({ language: "ja", autoStart: false,
+      composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: true });
+    for (const useSavedChats of [undefined, false, true]) {
+      for (const useTemporaryChats of [undefined, false, true, "stale-value"]) {
+        const contents = JSON.stringify({ ...original, useSavedChats, useTemporaryChats });
+        fs.writeFileSync(file, contents);
+        const expected = { ...original, useSavedChats: useSavedChats === true };
+        const store = createStateStore(file);
+        assert.deepEqual(store.read(), expected);
+        assert.equal(fs.readFileSync(file, "utf8"), contents, "reading must not rewrite user settings");
+        assert.deepEqual(store.update({ useTemporaryChats }), expected);
+        assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), expected);
+        assert.deepEqual(createStateStore(file).read(), expected);
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("UTF-8 settings retain complete explicit choices and interior BOM with either file prefix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-chat-state-bom-"));
+  const file = path.join(root, "state.json");
+  try {
+    for (const useSavedChats of [false, true]) {
+      const expected = createStateStore(file).update({ coreSetupComplete: true, autoStart: false,
+        useSavedChats, composerPredictionsEnabled: false, browserInteractionMode: "manual",
+        browserSmokeVersion: "6.1.14\uFEFF-test" });
+      for (const prefix of ["", "\uFEFF"]) {
+        const contents = prefix + JSON.stringify(expected);
+        fs.writeFileSync(file, contents);
+        assert.deepEqual(createStateStore(file).read(), expected);
+        assert.equal(fs.readFileSync(file, "utf8"), contents);
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("launcher state persists onboarding, language, and autostart atomically", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
   const file = path.join(root, "state.json");
@@ -31,7 +101,9 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       automaticWebSessionLimitMinutes: 300,
       automaticWebSessionLimitEnabled: false,
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: false,
       experimentalSkillAttachments: false,
+      experimentalPlusNativeContext: false,
       experimentalNoAutoCompact: false,
       experimentalPreparedWebSession: false,
       keepRunningOnClose: true,
@@ -75,7 +147,9 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       automaticWebSessionLimitMinutes: 300,
       automaticWebSessionLimitEnabled: false,
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: false,
       experimentalSkillAttachments: false,
+      experimentalPlusNativeContext: false,
       experimentalNoAutoCompact: false,
       experimentalPreparedWebSession: false,
       keepRunningOnClose: false,
@@ -169,10 +243,12 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       automaticWebSessionLimitMinutes: 300,
       automaticWebSessionLimitEnabled: false,
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: false,
       experimentalSkillAttachments: false,
       experimentalNoAutoCompact: false,
       experimentalPreparedWebSession: false,
       keepRunningOnClose: true,
+      experimentalPlusNativeContext: false,
       showBrowserDuringTurns: true,
       lockBrowserDuringTurns: true,
       browserInteractionMode: "automatic",

@@ -22,6 +22,11 @@ test("Limits identifies actual selected Pro family and keeps missing or conflict
   expect(chatGptUsageModelFromAnnouncements(["6 Pro, 5 of 5.", "Use Left and Right arrow keys to adjust power."])).toBe("gpt-6-pro");
   expect(chatGptUsageModelFromAnnouncements(["5.6 Pro, 5 of 5."])).toBe("gpt-5.6-pro");
   expect(chatGptUsageModelFromAnnouncements(["GPT-5.6 Sol Pro, 5 of 5."])).toBe("gpt-5.6-pro");
+  expect(chatGptUsageModelFromAnnouncements(["5.6 Pro, 5 of 5.", "5.6 Sol 5.6 Pro"])).toBe("gpt-5.6-pro");
+  expect(chatGptUsageModelFromAnnouncements(["5.6 Pro, 5 of 5.", "5.6 Sol 6 Pro"])).toBe("pro-unknown");
+  expect(chatGptUsageModelFromAnnouncements(["6 Pro, 5 of 5.", "6 Astra 6 Pro"])).toBe("gpt-6-pro");
+  expect(chatGptUsageModelFromAnnouncements(["6 Pro，第 5 個，共 5 個。"])).toBe("gpt-6-pro");
+  expect(chatGptUsageModelFromAnnouncements(["5.6 Pro，第 5 個，共 5 個。"])).toBe("gpt-5.6-pro");
   for (const descriptions of [[], ["Latest"], ["Pro"], ["5.6 Extra High, 4 of 5."],
     ["5.5 Pro"], ["6 Pro", "5.6 Pro"], ["Use 6 Pro"]]) {
     expect(chatGptUsageModelFromAnnouncements(descriptions)).toBe("pro-unknown");
@@ -32,7 +37,7 @@ test("Limits exposes only hashed account identity and distinguishes personal and
   let accountId = "account-personal";
   let structure = "personal";
   const page = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: async () => ({ userId: "user-id", accountId, structure, planType: "pro", needsAttention: false }),
   };
   const personal = await readChatGptUsageAccount(page as never);
@@ -89,4 +94,16 @@ test("unsupported plans and payment problems never activate browser plan inspect
   for (const personal of [false, true]) for (const planType of ["free", "plus", "pro", "prolite", "business", "unknown"]) {
     expect(supportsChatGptUsageTracking({ personal, planType })).toBe(personal && ["pro", "prolite"].includes(planType));
   }
+});
+
+
+test("usage accounting shares localized model parsing and rejects conflicting evidence", () => {
+  for (const separator of ["、", "，", "،", "؛", "：", "—", "。", ",", ";"]) {
+    expect(chatGptUsageModelFromAnnouncements([`6 Pro${separator}5 件中 5 番目。`])).toBe("gpt-6-pro");
+    expect(chatGptUsageModelFromAnnouncements([`5.6 Pro${separator}position`])).toBe("gpt-5.6-pro");
+  }
+  for (const other of ["6.1 Pro", "6 Sol Pro", "6 High", "7 Pro"]) {
+    expect(chatGptUsageModelFromAnnouncements(["6 Pro", other])).toBe("pro-unknown");
+  }
+  expect(chatGptUsageModelFromAnnouncements(["6 Pro for better answers"])).toBe("pro-unknown");
 });

@@ -1,3 +1,4 @@
+import type { ChatGptWebModelCapabilities } from "./chatgpt-web-models";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
@@ -87,8 +88,11 @@ export function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): bo
     solAvailable: before.solAvailable,
     extraHighAvailable: before.extraHighAvailable,
     proAvailable: before.proAvailable,
+    modelCapabilities: before.modelCapabilities,
     experimentalBiggerContext: before.experimentalBiggerContext,
+    composerPredictionsEnabled: before.composerPredictionsEnabled,
     experimentalSkillAttachments: before.experimentalSkillAttachments,
+    experimentalPlusNativeContext: before.experimentalPlusNativeContext,
     experimentalNoAutoCompact: before.experimentalNoAutoCompact,
     experimentalFreshConversationPerTurn: before.experimentalFreshConversationPerTurn,
     useSavedChats: before.useSavedChats,
@@ -119,8 +123,11 @@ export function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): bo
     solAvailable: after.solAvailable,
     extraHighAvailable: after.extraHighAvailable,
     proAvailable: after.proAvailable,
+    modelCapabilities: after.modelCapabilities,
     experimentalBiggerContext: after.experimentalBiggerContext,
+    composerPredictionsEnabled: after.composerPredictionsEnabled,
     experimentalSkillAttachments: after.experimentalSkillAttachments,
+    experimentalPlusNativeContext: after.experimentalPlusNativeContext,
     experimentalNoAutoCompact: after.experimentalNoAutoCompact,
     experimentalFreshConversationPerTurn: after.experimentalFreshConversationPerTurn,
     useSavedChats: after.useSavedChats,
@@ -143,11 +150,27 @@ export function tunnelWorkerRuntimeChanged(before: AppConfig | undefined, after:
     || JSON.stringify(before.tunnel) !== JSON.stringify(after.tunnel);
 }
 
+/**
+ * On Windows, EACCES can indicate a reserved port, an exclusive binding, or a security policy.
+ * The error alone does not identify which one prevented the listener from starting.
+ */
+export function portBindFailureMessage(
+  host: string,
+  port: number,
+  error: NodeJS.ErrnoException,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const message = `Cannot bind ${host}:${port}: ${error.message}`;
+  if (platform !== "win32" || error.code !== "EACCES") return message;
+  return `${message}. Windows may have reserved this port, another service may hold it exclusively, or security software may be blocking it. `
+    + "See \"Windows: Cannot bind the local port (EACCES)\" in TROUBLESHOOTING.md";
+}
+
 async function assertPortAvailable(host: string, port: number): Promise<void> {
   await new Promise<void>((resolveAvailable, rejectAvailable) => {
     const server = createServer();
     server.unref();
-    server.once("error", error => rejectAvailable(new Error(`Cannot bind ${host}:${port}: ${error.message}`)));
+    server.once("error", error => rejectAvailable(new Error(portBindFailureMessage(host, port, error))));
     server.listen(port, host, () => server.close(error => error ? rejectAvailable(error) : resolveAvailable()));
   });
 }
@@ -195,20 +218,35 @@ async function inspectLauncherCapabilities(
   existing: AppConfig | undefined,
   refreshAccountCapabilities: boolean,
   expectedProfile: "production" | "development",
-): Promise<{ solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean }> {
-  const detectCapabilities = launcherCapabilityProbeRequired(
+): Promise<{ solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean; modelCapabilities?: ChatGptWebModelCapabilities }> {
+  const savedUpgrade = existing && existing.releaseVersion !== config.releaseVersion
+    && existing.browserHost === "launcher" && existing.browserInteractionMode !== "manual"
+    && typeof existing.solAvailable === "boolean" && typeof existing.extraHighAvailable === "boolean"
+    && typeof existing.proAvailable === "boolean";
+  const detectCapabilities = !(savedUpgrade && !refreshAccountCapabilities) && launcherCapabilityProbeRequired(
     existing,
     refreshAccountCapabilities,
     config.browserInteractionMode,
   );
+  if (!detectCapabilities) {
+    // Updating the local runtime or its settings does not require a live web session.
+    // Only initial setup and an explicit model refresh inspect the account.
+    return {
+      solAvailable: existing!.solAvailable,
+      extraHighAvailable: existing!.extraHighAvailable === true,
+      proAvailable: existing!.proAvailable,
+      modelCapabilities: existing!.modelCapabilities,
+    };
+  }
   const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, {
-    detectCapabilities,
+    detectCapabilities: true,
     expectedProfile,
   });
   return {
     solAvailable: detectCapabilities ? inspected.solAvailable === true : existing!.solAvailable,
     extraHighAvailable: detectCapabilities ? inspected.extraHighAvailable === true : existing!.extraHighAvailable === true,
     proAvailable: detectCapabilities ? inspected.proAvailable === true : existing!.proAvailable,
+    modelCapabilities: detectCapabilities ? inspected.modelCapabilities : existing!.modelCapabilities,
   };
 }
 
@@ -261,6 +299,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   let solAvailable: boolean | undefined = config.solAvailable;
   let extraHighAvailable: boolean | undefined = config.extraHighAvailable;
   let proAvailable: boolean | undefined = config.proAvailable;
+  let modelCapabilities = config.modelCapabilities;
   if (config.browserInteractionMode === "manual") {
     // The generic manual route is independent of account capabilities and never inspects the DOM.
   } else if (config.browserHost === "launcher") {
@@ -274,18 +313,22 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     solAvailable = capabilities.solAvailable;
     extraHighAvailable = capabilities.extraHighAvailable;
     proAvailable = capabilities.proAvailable;
+    modelCapabilities = capabilities.modelCapabilities;
   } else {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
     extraHighAvailable = stored.extraHighAvailable;
     proAvailable = stored.proAvailable;
+    modelCapabilities = stored.modelCapabilities;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
         || extraHighAvailable === undefined
-        || proAvailable === undefined);
+        || proAvailable === undefined
+        || !modelCapabilities
+        || Date.now() - modelCapabilities.observedAt > 30 * 60_000);
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
         "Setup must verify the browser account before changing the running daemon. "
@@ -298,17 +341,20 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       solAvailable = login.solAvailable;
       extraHighAvailable = login.extraHighAvailable;
       proAvailable = login.proAvailable;
+      modelCapabilities = login.modelCapabilities;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
       extraHighAvailable = inspected.extraHighAvailable;
       proAvailable = inspected.proAvailable;
+      modelCapabilities = inspected.modelCapabilities;
     }
   }
   config.solAvailable = solAvailable === true;
   config.extraHighAvailable = config.solAvailable && extraHighAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
+  config.modelCapabilities = modelCapabilities;
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -380,6 +426,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (integrations.codex) {
     installCodexIntegration(config, {
       replaceExistingRoute: options.replaceCodexRoute,
+      preserveDisconnectedRoute: options.preserveDisconnectedRoute,
     });
   }
   if (integrations.claude) {
@@ -429,7 +476,9 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     config.solAvailable = capabilities.solAvailable;
     config.extraHighAvailable = capabilities.solAvailable && capabilities.extraHighAvailable;
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
+    config.modelCapabilities = capabilities.modelCapabilities;
   }
+
 
   await configureSetupTunnel(config, existing, options);
   // The launcher supervisor acquires the DEV runtime only after this config is committed.

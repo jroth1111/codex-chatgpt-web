@@ -12,23 +12,57 @@ const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.c
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
-test("Bigger Context waits for startup and route recovery without invalidating healthy setup", async () => {
+function preferenceIpc(dependencies) {
   const vm = require("node:vm");
-  for (const fails of [false, true]) {
-    let completeAuthentication;
-    const startupAuthenticationRefresh = new Promise(resolve => { completeAuthentication = resolve; });
+  const ts = require("typescript");
+  const ast = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true);
+  const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node)
+    && ["syncBrowserPreferences", "registerIpc"].includes(node.name?.text));
+  assert.equal(declarations.length, 2);
+  const handlers = new Map();
+  const sandbox = { runtimeStartup: Promise.resolve(), SessionReminderView: class {}, mainWindow: {}, loadRenderer() {},
+    ipcMain: { on() {} }, logger: { info() {} },
+    releaseRetainedConversation: require("../electron/retained-turn-release.cjs").releaseRetainedConversation,
+    registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler), ...dependencies };
+  vm.runInNewContext(declarations.map(node => node.getText(ast)).join("\n")
+    + "\nregisterIpc({ logger, stateStore });", sandbox);
+  let api;
+  vm.runInNewContext(preloadSource, { require: () => ({
+    contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
+    ipcRenderer: { invoke: (channel, ...args) => {
+      assert.ok(handlers.has(channel), `preload channel must be registered: ${channel}`);
+      return handlers.get(channel)(null, ...args);
+    } },
+  }) });
+  return { api, handlers, sync: () => sandbox.syncBrowserPreferences(dependencies.stateStore,
+    dependencies.runtimeHost.runtimeConfigSnapshot().config) };
+}
+
+test("runtime context settings wait for startup and route recovery without invalidating healthy setup", async () => {
+  const vm = require("node:vm");
+  for (const [method, property, channel] of [
+    ["setBiggerContext", "experimentalBiggerContext", "launcher:bigger-context"],
+    ["setExperimentalNoAutoCompact", "experimentalNoAutoCompact", "launcher:no-auto-compact"],
+    ["setExperimentalPlusNativeContext", "experimentalPlusNativeContext", "launcher:plus-native-context"],
+  ]) for (const fails of [false, true]) {
+    const startupAuthenticationRefresh = new Promise(() => {});
+    let completeRuntime;
+    const runtimeReady = new Promise(resolve => { completeRuntime = resolve; });
+    let reachedStartup;
+    const startupReached = new Promise(resolve => { reachedStartup = resolve; });
     let finishRuntimeStartup;
     const runtimeStartup = new Promise(resolve => { finishRuntimeStartup = resolve; });
     let startupSettled = false;
     const calls = [];
     const handlers = new Map();
-    const config = { mode: "full", experimentalBiggerContext: false };
+    const config = { mode: "full", experimentalBiggerContext: false, [property]: false };
     const state = { coreSetupComplete: true, codexCatalogVerified: true };
     const stateStore = { read: () => state, update: patch => Object.assign(state, patch) };
-    const logger = { info() {}, error() {} };
+    const logger = { info() {}, error() {}, warn() {} };
     const context = vm.createContext({
       runtimeStartup, finishRuntimeStartup: () => { startupSettled = true; finishRuntimeStartup(); },
-      startupAuthenticationRefresh, logger, stateStore, IS_DEV_PROFILE: false,
+      startupAuthenticationRefresh, logger, stateStore, IS_DEV_PROFILE: false, browserHost: null,
+      SessionReminderView: class {}, mainWindow: {}, loadRenderer() {},
       ipcMain: { on() {} }, registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
       send() {}, publishOperation() {}, startCatalogVerificationMonitor() {}, stopCatalogVerificationMonitor() {},
       syncBrowserPreferences() {},
@@ -38,34 +72,41 @@ test("Bigger Context waits for startup and route recovery without invalidating h
         readConfig: () => config,
         startIfConfigured: async () => {
           calls.push("startup");
+          reachedStartup();
+          await runtimeReady;
           if (fails) throw new Error("actual startup failure");
           return { status: "ready" };
         },
       },
       runtimeHost: {
+        currentOperation: () => null,
         upgradeManagedRuntime: async () => ({ updated: false }),
         runtimeConfigSnapshot: () => ({ configured: true, config }),
         bridgeStatus: async () => ({ installed: false }),
-        setBiggerContext: async enabled => {
+        connectBridgeRoute: async () => ({ changed: false }),
+        [method]: async enabled => {
           assert.equal(startupSettled, true, "settings must wait through startup recovery too");
           calls.push("setting");
-          config.experimentalBiggerContext = enabled;
+          config[property] = enabled;
           return { enabled };
         },
       },
     });
-    vm.runInContext(electronMain.slice(electronMain.indexOf("function registerIpc("), electronMain.indexOf("async function requestQuit("))
+    vm.runInContext(electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("async function requestQuit("))
       + "\nregisterIpc({ logger, stateStore });", context);
     const start = electronMain.indexOf("} else void (async () => {");
     vm.runInContext(electronMain.slice(start + "} else ".length, electronMain.indexOf('  app.on("before-quit"', start)), context);
-    const setting = handlers.get("launcher:bigger-context")({}, true);
-    // Read-only UI remains usable while authentication/startup is pending.
+    const setting = handlers.get(channel)({}, true);
+    void setting.catch(() => {});
+    // Runtime startup proceeds even if the browser session check never completes.
+    // Settings still wait for runtime readiness, and read-only UI stays usable.
     assert.equal((await handlers.get("launcher:limits")()).enabled, false);
-    assert.deepEqual(calls, []);
-    completeAuthentication();
+    await startupReached;
+    assert.deepEqual(calls, ["startup"]);
+    completeRuntime();
     await setting;
     assert.deepEqual(calls, fails ? ["startup", "recovery", "setting"] : ["startup", "setting"]);
-    assert.equal(state.experimentalBiggerContext, true);
+    assert.equal(state[property], true);
     assert.equal(state.coreSetupComplete, !fails, "only a real startup failure may invalidate setup");
   }
 });
@@ -149,7 +190,7 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
   assert.match(appSource, /snapshot\.profile === "development"/);
   assert.match(appSource, /data-profile=\{snapshot\.profile\}/);
-  assert.match(settingsSource, /<SettingRow body=\{snapshot\.state\.browserInteractionMode === "manual" \? copy\.manualBiggerContextBody : copy\.biggerContextBody\} label=\{copy\.biggerContext\}>/);
+  assert.match(settingsSource, /<SettingRow body=\{snapshot\.state\.browserInteractionMode === "manual" \? copy\.manualBiggerContextBody\s*: copy\.biggerContextBody\} label=\{copy\.biggerContext\}>/);
   assert.match(settingsSource, /api!\.setBiggerContext\(enabled\)/);
   assert.match(electronMain, /runtimeHost\.setBiggerContext\(enabled === true\)/);
   assert.match(settingsSource, /api!\.setExperimentalNoAutoCompact\(enabled\)/);
@@ -173,23 +214,8 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.capturePasskeyLogin\(\)/);
+  assert.match(electronMain, /loginWithPasskey: onProgress => runtimeHost\.capturePasskeyLogin\(onProgress\)/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
-});
-
-test("MCP connection requires a verified Codex catalog or current Claude setup", () => {
-  assert.match(
-    appSource,
-    /manualInteraction \|\| configuringInactiveMode \|\| hasVerifiedClientIntegration\(snapshot\.state\)\s+\? copy\.mcpStepTwoHint : copy\.mcpCatalogRequired/,
-  );
-  assert.match(appSource, /\|\| \(!manualInteraction && !configuringInactiveMode && !hasVerifiedClientIntegration\(snapshot\.state\)\)/);
-  const body = appSource.match(/function hasVerifiedClientIntegration\(state: LauncherState\): boolean \{([\s\S]*?)\n\}/)[1];
-  const verified = new Function("state", body);
-  assert.equal(verified({ codexCatalogVerified: true, claudeSetupComplete: false }), true);
-  assert.equal(verified({ codexCatalogVerified: false, claudeSetupComplete: true }), true);
-  assert.equal(verified({ codexCatalogVerified: false, claudeSetupComplete: false }), false);
-  assert.equal(verified({}), false);
-  assert.equal(verified({ codexCatalogVerified: "true", claudeSetupComplete: "true" }), false);
 });
 
 test("MCP navigation remains locked while an operation is active", () => {
@@ -242,11 +268,17 @@ test("MCP verification proves runtime health before checking the connector", () 
   assert.match(appSource, /index < step \|\| \(index === 2 && verified\) \? " is-complete"/);
 });
 
-test("saved ChatGPT authentication is refreshed before setup is presented", () => {
-  const refresh = electronMain.indexOf("browserHost.refreshAuthentication()");
-  const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()");
-  assert.ok(refresh >= 0 && upgrade > refresh, "runtime upgrade must follow saved-session refresh");
-  assert.match(electronMain.slice(refresh, upgrade), /await startupAuthenticationRefresh;/);
+test("saved ChatGPT authentication refresh does not gate local runtime startup", () => {
+  assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
+  const productionStartup = electronMain.indexOf("} else void (async () => {");
+  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
+  const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
+  const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
+  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute({ recoveryOnly: true })", runtimeStart);
+  assert.equal(refreshBarrier, -1, "the bridge must start while ChatGPT is signed out or unavailable");
+  assert.ok(upgrade > productionStartup);
+  assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
+  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 
@@ -267,7 +299,8 @@ test("completed model setup remains a repeatable capability probe", () => {
 test("session reminders expose dismissal and a real storage-clearing logout", () => {
   assert.match(electronMain, /sessionRefreshReminderAt:\s*nextSessionRefreshReminderAt\(\)/);
   assert.match(electronMain, /launcher:session-reminder-dismiss/);
-  assert.match(electronMain, /launcher:browser-logout[\s\S]*?browserHost\.logout\(\)/);
+  assert.match(electronMain, /handle\("launcher:browser-logout", logoutChatGpt\)/);
+  assert.match(electronMain, /const logoutChatGpt = async[\s\S]*?await browserHost\.logout\(\)/);
   assert.match(preloadSource, /dismissSessionReminder:[\s\S]*?launcher:session-reminder-dismiss/);
   assert.match(preloadSource, /logoutChatGpt:[\s\S]*?launcher:browser-logout/);
   assert.match(browserHostSource, /session\.clearStorageData\(\)/);
@@ -369,15 +402,15 @@ test("catalog verification reports a failed request instead of requesting anothe
   const events = [];
   let tick;
   let payload = { pid: 10, successful_model_catalog_requests: 0, model_catalog_requests: 0, last_model_catalog_result: null };
-  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", {
+  vm.runInNewContext(source + "\nconst publishOperation = op => { lastOperation = op; recordOperation(op); };\nstartCatalogVerificationMonitor({ logger, stateStore });", {
     catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
     stopCatalogVerificationMonitor() {},
     runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
     stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
     setInterval: callback => { tick = callback; return { unref() {} }; },
     logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args), debug() {} },
-    send() {}, publishOperation: op => operations.push(op),
-    nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason})." }),
+    send() {}, recordOperation: op => operations.push(op),
+    nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason}).", catalogReady: "Loaded." }),
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(operations.length, 0);
@@ -400,28 +433,22 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.equal(state.codexCatalogVerified, true);
   assert.equal(state.codexRestartRequired, false);
   assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
+  assert.equal(operations.at(-1)?.status, "completed");
 });
 
 test("browser preference IPC commits only after setup succeeds and refuses active browser work", async () => {
-  const vm = require("node:vm");
-  for (const [property, method, channel, nextChannel] of [
-    ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn", "launcher:fresh-conversation-per-turn", "launcher:use-saved-chats"],
-    ["useSavedChats", "setUseSavedChats", "launcher:use-saved-chats", "launcher:auto-approve-tool-calls"],
-    ["autoApproveToolCalls", "setAutoApproveToolCalls", "launcher:auto-approve-tool-calls", "launcher:set-preference"],
+  for (const [property, method] of [
+    ["composerPredictionsEnabled", "setComposerPredictions"],
+    ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn"],
+    ["useSavedChats", "setUseSavedChats"],
+    ["autoApproveToolCalls", "setAutoApproveToolCalls"],
   ]) {
-    const source = electronMain.slice(
-      electronMain.indexOf(`handle("${channel}",`),
-      electronMain.indexOf(`handle("${nextChannel}",`),
-    );
-    const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
-    const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+    const state = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+    const config = { ...state };
     const events = [];
-    let handler, finishSetup, setupFailure, calls = 0;
+    let finishSetup, setupFailure, calls = 0;
     const browserHost = { activeTraceId: "running-turn", currentOperation: () => null, turnTabs: new Map() };
-    const syncSource = electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc("));
-    vm.runInNewContext(syncSource + source, {
-      handle: (_channel, callback) => { handler = callback; }, browserHost,
-      releaseRetainedConversation: require("../electron/retained-turn-release.cjs").releaseRetainedConversation,
+    const { api } = preferenceIpc({ browserHost,
       runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ config }), [method]: async enabled => {
         calls++;
         if (setupFailure) throw setupFailure;
@@ -432,21 +459,14 @@ test("browser preference IPC commits only after setup succeeds and refuses activ
       stateStore: { read: () => ({ ...state }), update: patch => Object.assign(state, patch) },
       send: (channel, value) => events.push({ channel, value: { ...value } }),
     });
-    await assert.rejects(() => handler(null, true), /Finish or cancel active ChatGPT turns/);
+    await assert.rejects(() => api[method](true), /Finish or cancel active ChatGPT turns/);
     browserHost.activeTraceId = null;
     browserHost.currentOperation = () => "browser-smoke";
-    await assert.rejects(() => handler(null, true), /Finish or cancel active ChatGPT turns/);
+    await assert.rejects(() => api[method](true), /Finish or cancel active ChatGPT turns/);
     assert.equal(calls, 0);
     browserHost.currentOperation = () => null;
-    let api;
-    vm.runInNewContext(preloadSource, { require: () => ({
-      contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
-      ipcRenderer: { invoke: (actualChannel, enabled) => {
-        assert.equal(actualChannel, channel);
-        return handler(null, enabled);
-      } },
-    }) });
     const changing = api[method](true);
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(state[property], false);
     assert.equal(events.length, 0);
     finishSetup();
@@ -457,6 +477,107 @@ test("browser preference IPC commits only after setup succeeds and refuses activ
     await assert.rejects(() => api[method](false), /synthetic setup rollback/);
     assert.equal(state[property], true);
     assert.equal(events.length, 1);
+  }
+});
+
+test("saved-chat preload IPC waits for real setup and retires only completed automatic and manual chats", async () => {
+  const os = require("node:os");
+  const { RuntimeHost } = require("../electron/runtime.cjs");
+  const { BrowserHost } = require("../electron/browser-host.cjs");
+  const { createStateStore } = require("../electron/state.cjs");
+  for (const browserInteractionMode of ["automatic", "manual"]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-saved-ipc-"));
+    try {
+      const configPath = path.join(root, "config.json");
+      const original = { mode: "full", browserHost: "launcher", browserInteractionMode,
+        useSavedChats: false, composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false };
+      fs.writeFileSync(configPath, JSON.stringify(original));
+      const readConfig = () => JSON.parse(fs.readFileSync(configPath, "utf8"));
+      const stateStore = createStateStore(path.join(root, "state.json"));
+      stateStore.update({ onboardingComplete: true, coreSetupComplete: true, browserInteractionMode,
+        useEnhancedWebSessionMode: false, useSavedChats: false });
+      let startupReady, runtimeReady, reachedRuntime, holdRuntime = true, failSetup = false, setupCalls = 0;
+      const runtimeStartup = new Promise(resolve => { startupReady = resolve; });
+      const started = new Promise(resolve => { reachedRuntime = resolve; });
+      const ready = new Promise(resolve => { runtimeReady = resolve; });
+      const logger = { info() {}, warn() {}, error() {} };
+      const runtimeHost = new RuntimeHost({ app: { getPath: () => root }, logger,
+        coreHome: root, codexHome: path.join(root, "codex"), sourceRoot: root,
+        browserDescriptorPath: path.join(root, "browser.json"), getBrowserInteractionMode: () => browserInteractionMode,
+        supervisor: { coreHome: root, configPath, readConfig, readSetupConfig: readConfig,
+          stopForSetup: async () => ({ status: "stopped" }),
+          startIfConfigured: async () => {
+            if (holdRuntime) { reachedRuntime(); await ready; }
+            return { status: "ready" };
+          } },
+      });
+      runtimeHost.run = async (_name, args) => {
+        if (args.includes("--preflight-only")) return { code: 0 };
+        setupCalls++;
+        assert.ok(args.includes(browserInteractionMode === "manual" ? "--zero-risk-browser-interaction" : "--automatic-browser-interaction"));
+        assert.equal(args.includes("--ordinary-chats"), false);
+        fs.writeFileSync(configPath, JSON.stringify({ ...readConfig(), useSavedChats: args.includes("--saved-chats") }));
+        if (failSetup) throw new Error("synthetic saved-chat setup failure");
+        return { code: 0 };
+      };
+      const closed = [], events = [];
+      const tab = (id, interactionMode, status = "ready") => ({ id, traceId: id, interactionMode, status,
+        conversationKey: "shared-history", view: { webContents: { isDestroyed: () => false, close: () => closed.push(id) } } });
+      const automatic = tab("automatic", "automatic"), manual = tab("manual", "manual");
+      const running = tab("running", browserInteractionMode, "running");
+      const browserHost = Object.assign(Object.create(BrowserHost.prototype), {
+        manualOperation: null, turnTabs: new Map([automatic, manual, running].map(value => [value.id, value])),
+        currentOperation() { return this.manualOperation; }, logger, selectedTabId: "home",
+        syncPowerSaveBlocker() {}, syncViewVisibility() {}, snapshot: () => ({}), writeDescriptor() {},
+      });
+      const { api, handlers, sync } = preferenceIpc({ runtimeStartup, runtimeHost, browserHost, stateStore,
+        send: (channel, value) => events.push([channel, value]) });
+      assert.ok(handlers.has("launcher:use-saved-chats"), "register the actual preload channel");
+      assert.equal(handlers.has("launcher:temporary-chats"), false);
+      const blocked = api.setUseSavedChats(true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(setupCalls, 0, "the runtime startup fence must hold IPC");
+      startupReady();
+      await assert.rejects(blocked, /Finish or cancel active ChatGPT turns/);
+      browserHost.turnTabs.delete(running.id);
+      browserHost.manualOperation = "browser-smoke";
+      await assert.rejects(api.setUseSavedChats(true), /Finish or cancel active ChatGPT turns/);
+      browserHost.manualOperation = null;
+      await assert.rejects(api.setUseSavedChats("true"), /boolean/);
+      const changing = api.setUseSavedChats(true);
+      await started;
+      assert.equal(readConfig().useSavedChats, true, "setup has written its candidate before runtime readiness");
+      assert.equal(sync().useSavedChats, false, "in-flight setup must not publish its uncommitted candidate");
+      assert.equal(stateStore.read().useSavedChats, false);
+      assert.deepEqual(closed, []);
+      assert.deepEqual(events, []);
+      browserHost.turnTabs.set(running.id, running);
+      holdRuntime = false;
+      runtimeReady();
+      assert.equal((await changing).useSavedChats, true);
+      assert.equal(createStateStore(path.join(root, "state.json")).read().useSavedChats, true);
+      assert.deepEqual(closed, ["automatic", "manual"]);
+      assert.equal(browserHost.turnTabs.get(running.id), running);
+      assert.equal(events.length, 1);
+      sync();
+      assert.deepEqual(closed, ["automatic", "manual"], "identical sync must not repeat retirement");
+      assert.equal(events.length, 1);
+      await assert.rejects(api.setUseSavedChats(false), /Finish or cancel active ChatGPT turns/);
+      browserHost.turnTabs.delete(running.id);
+      const retained = tab("retained", browserInteractionMode);
+      browserHost.turnTabs.set(retained.id, retained);
+      failSetup = true;
+      await assert.rejects(api.setUseSavedChats(false), /synthetic saved-chat setup failure/);
+      assert.equal(readConfig().useSavedChats, true, "real setup rollback must restore the prior preference");
+      assert.equal(stateStore.read().useSavedChats, true);
+      assert.equal(browserHost.turnTabs.get(retained.id), retained);
+      assert.deepEqual(closed, ["automatic", "manual"]);
+      assert.equal(events.length, 1);
+      failSetup = false;
+      assert.equal((await api.setUseSavedChats(false)).useSavedChats, false);
+      assert.equal(readConfig().useSavedChats, false, "false restores Temporary Chat without a parallel preference");
+      assert.deepEqual(closed, ["automatic", "manual", "retained"]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }
 });
 
@@ -502,6 +623,36 @@ test("fresh-conversation snapshot uses runtime configuration and manual mode cle
   }
   config = {};
   assert.equal((await snapshot()).state.experimentalFreshConversationPerTurn, false);
+  assert.equal((await snapshot()).state.biggerContextAvailable, false);
+  config.solAvailable = true;
+  assert.equal((await snapshot()).state.biggerContextAvailable, true);
+  config.solAvailable = false;
+  assert.equal((await snapshot()).state.biggerContextAvailable, true);
+});
+
+test("changing Bigger Context retires ready automatic chats before a previous mode can reuse them", () => {
+  const vm = require("node:vm");
+  const state = { experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: true,
+    autoApproveToolCalls: false, biggerContextAvailable: true };
+  const tabs = new Map([
+    ["old", { status: "ready", conversationKey: "old-luna", interactionMode: "automatic" }],
+    ["active", { status: "running", conversationKey: "running", interactionMode: "automatic" }],
+    ["manual", { status: "ready", conversationKey: "manual", interactionMode: "manual" }],
+  ]);
+  const released = [];
+  const context = vm.createContext({
+    runtimeHost: { currentOperation: () => null }, browserHost: { turnTabs: tabs },
+    releaseRetainedConversation: (_host, key) => { released.push(key); tabs.delete("old"); }, send() {},
+  });
+  vm.runInContext(electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc(")), context);
+  const store = { read: () => state, update: patch => Object.assign(state, patch) };
+  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true, useSavedChats: true });
+  assert.deepEqual(released, ["old-luna"]);
+  assert.equal(state.experimentalBiggerContext, true);
+  assert.equal(tabs.has("active"), true);
+  assert.equal(tabs.has("manual"), true);
+  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true, useSavedChats: true });
+  assert.deepEqual(released, ["old-luna"]);
 });
 
 test("fresh-conversation control is translated and enforces Original automatic mode", async () => {
@@ -528,6 +679,7 @@ test("fresh-conversation control is translated and enforces Original automatic m
     api: {
       setFreshConversationPerTurn: async enabled => { invocation = enabled; return { experimentalFreshConversationPerTurn: enabled }; },
       setAutoApproveToolCalls: async enabled => { invocation = enabled; return { autoApproveToolCalls: enabled }; },
+      setBiggerContext: async enabled => { invocation = enabled; return { experimentalBiggerContext: enabled }; },
     },
     messageOf: String, platformLabel: String, languages: require("../electron/languages.json"),
     biggerContextSwitchState: contextMode.biggerContextSwitchState,
@@ -566,6 +718,27 @@ test("fresh-conversation control is translated and enforces Original automatic m
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(invocation, true);
         assert.equal(saved.experimentalFreshConversationPerTurn, true);
+      }
+    }
+    assert.ok(copy.biggerContextBody.length > 20);
+    for (const available of [undefined, false, true]) {
+      const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {}, browser: null,
+        snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" },
+          state: { browserInteractionMode: "automatic", coreSetupComplete: true,
+            useEnhancedWebSessionMode: false, experimentalBiggerContext: false, biggerContextAvailable: available } },
+        updateState: value => { saved = value; },
+      });
+      const row = visit(tree).find(node => node.type?.name === "SettingRow" && node.props.label === copy.biggerContext);
+      assert.ok(row);
+      assert.equal(row.props.body, copy.biggerContextBody);
+      const control = visit(row).find(node => node.type?.name === "Switch");
+      assert.equal(control.props.checked, false);
+      assert.equal(control.props.disabled, available !== true);
+      if (!control.props.disabled) {
+        control.props.onChange(true);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(invocation, true);
+        assert.equal(saved.experimentalBiggerContext, true);
       }
     }
     for (const key of ["autoApproveTools", "autoApproveToolsBody", "manualAutoApproveUnavailable", "toolApprovalNeeded", "toolApprovalPendingBody"]) {
@@ -692,4 +865,24 @@ test("plugin name editor keeps the Codex prefix and submits only the editable su
   assert.match(settings, /maxLength=\{74\}/);
   assert.match(settings, /setConnectorNameSuffix\(nameSuffix\.trim\(\)\)/);
   assert.match(settings, /setConfirmNameChange\(true\)/);
+});
+
+
+test("catalog recovery clears its error banner but preserves a newer unrelated failure", () => {
+  const vm = require("node:vm");
+  const source = appSource.slice(appSource.indexOf("const unsubscribeOperation = api.onOperation"), appSource.indexOf("const unsubscribeLog ="));
+  let callback, error = null;
+  vm.runInNewContext(source, {
+    api: { onOperation: fn => { callback = fn; } },
+    setOperation() {}, catalogError: { current: null },
+    setError: value => { error = typeof value === "function" ? value(error) : value; },
+  });
+  callback({ name: "catalog-verification", status: "failed", message: "Catalog error" });
+  assert.equal(error, "Catalog error");
+  callback({ name: "catalog-verification", status: "completed", message: "Loaded" });
+  assert.equal(error, null);
+  callback({ name: "catalog-verification", status: "failed", message: "Catalog error" });
+  callback({ name: "setup", status: "failed", message: "Setup error" });
+  callback({ name: "catalog-verification", status: "completed", message: "Loaded" });
+  assert.equal(error, "Setup error");
 });

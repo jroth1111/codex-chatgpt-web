@@ -15,6 +15,15 @@ export const CHATGPT_WEB_AGENT_WAIT_MAX_MS = 3_600_000;
 export const CHATGPT_WEB_SYNC_WAIT_RULE = "Use timeout_ms=30000 for wait_agent. A timeout means pending; repeat the same target ids until a native terminal result is returned.";
 export const CHATGPT_WEB_AGENT_WAIT_RULE = "Native2 wait_agent accepts a logical timeout_ms from 30000 to 3600000 in 30000 ms steps. It returns an asynchronous wait_id, not an agent status. Retrieve that same operation with codex_tool_inventory query=next_query and the same turn_token until operation_status=ready; inspect result for the original native outcome. Enhanced keeps the MCP channel responsive by running 30000 ms native wait slices internally until the agent reaches a terminal state or the logical timeout expires. Do not start another wait while a receipt is pending, busy-poll, or embed wait_agent in raw exec.";
 export const CONNECTOR_LONG_POLL_SLICE_MS = 30_000;
+export const CHATGPT_WEB_COMMAND_POLL_INPUT_MAX_MS = 300_000;
+export const CHATGPT_WEB_COMMAND_POLL_MAX_MS = 60_000;
+export const COMMAND_POLL_TRANSPORT_RULE = "Native2 command polls accept integer yield_time_ms from 250 to 300000; the bridge slices native waits internally. Prefer polls at most 60000, return after each poll, and poll the same session again if it is still running.";
+
+export function assertCommandPollArguments(args: Record<string, unknown>): void {
+  const value = args.yield_time_ms;
+  if (value !== undefined && (typeof value !== "number" || !Number.isInteger(value)
+    || value < 250 || value > CHATGPT_WEB_COMMAND_POLL_INPUT_MAX_MS)) throw new Error(COMMAND_POLL_TRANSPORT_RULE);
+}
 
 const wireName = (tool: CodexTool): string => namespacedToolName(tool.namespace, tool.name);
 const isAgentWaitTool = (tool: CodexTool): boolean => tool.name === "wait_agent"
@@ -39,6 +48,7 @@ export function matchingToolInventory(tools: CodexTool[], query?: string): Codex
 export function browserToolDescription(tool: CodexTool, native = true): string {
   if (native && !tool.namespace && tool.name === "Bash" && tool.parameters.properties && Object.hasOwn(tool.parameters.properties, "run_in_background")) return `${tool.description}\n\nLong commands must use the native run_in_background task handoff when TaskOutput is advertised. Keep the command's intended timeout; retrieve the same task_id with TaskOutput until its real terminal result. Never rerun the command because a response wait is pending.`;
   if (native && !tool.namespace && tool.name === "TaskOutput" && tool.parameters.properties && Object.hasOwn(tool.parameters.properties, "timeout")) return `${tool.description}\n\nUse block=true and timeout=30000 for each transport-safe response wait. A pending result does not cancel the task or establish success. Continue the same task_id without resubmitting its command, and inspect the real terminal output/exit status before answering.`;
+  if (!tool.namespace && tool.name === "write_stdin") return `${tool.description}\n\n${COMMAND_POLL_TRANSPORT_RULE}`;
   const waitRule = native ? CHATGPT_WEB_AGENT_WAIT_RULE : CHATGPT_WEB_SYNC_WAIT_RULE;
   if (isAgentWaitTool(tool)) return `${tool.description}\n\n${waitRule}`;
   if (!tool.namespace && tool.name === "exec") {
@@ -48,6 +58,14 @@ export function browserToolDescription(tool: CodexTool, native = true): string {
 }
 
 export function browserToolParameters(tool: CodexTool, logicalAgentWait = false): Record<string, unknown> {
+  if (!tool.namespace && tool.name === "write_stdin") {
+    const parameters = structuredClone(tool.parameters);
+    const properties = parameters.properties as Record<string, Record<string, unknown>> | undefined;
+    const { default: _default, const: _const, enum: _enum, ...poll } = properties?.yield_time_ms ?? {};
+    return { ...parameters, properties: { ...properties, yield_time_ms: {
+      ...poll, type: "number", minimum: 250, maximum: CHATGPT_WEB_COMMAND_POLL_MAX_MS,
+    } } };
+  }
   if (!isAgentWaitTool(tool)) return tool.parameters;
   const parameters = structuredClone(tool.parameters);
   const properties = parameters.properties && typeof parameters.properties === "object" && !Array.isArray(parameters.properties)
@@ -91,6 +109,7 @@ export function agentWaitLogicalTimeoutMs(args: Record<string, unknown>): number
 }
 
 export function assertBrowserToolArguments(tool: CodexTool, args: Record<string, unknown>): void {
+  if (!tool.namespace && tool.name === "write_stdin") assertCommandPollArguments(args);
   if (isAgentWaitTool(tool) && args.timeout_ms !== CHATGPT_WEB_AGENT_WAIT_POLL_MS) {
     throw new Error(`ChatGPT Web wait_agent requires timeout_ms=${CHATGPT_WEB_AGENT_WAIT_POLL_MS}`
       + " so the shared MCP channel remains available to spawned Web agents");

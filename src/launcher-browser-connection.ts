@@ -1,8 +1,38 @@
+export class LauncherBrowserTurnCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBrowserTurnCancelledError";
+  }
+}
+
+export class LauncherRetainedConversationUnavailableError extends Error {
+  constructor(message: string) { super(message); this.name = "LauncherRetainedConversationUnavailableError"; }
+}
+
+export class LauncherBrowserTurnOwnerLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBrowserTurnOwnerLostError";
+  }
+}
+
 export interface LauncherBrowserConnectionStages<TBrowser, TResult> {
   ready(timeoutMs: number): Promise<void>;
   connect(timeoutMs: number): Promise<TBrowser>;
   select(browser: TBrowser, timeoutMs: number): Promise<TResult>;
   close(browser: TBrowser): Promise<unknown>;
+}
+
+const connectionClosures = new WeakMap<object, Promise<void>>();
+
+/** Shared across startup, acquisition and turn cleanup, including aborted/failed selection. */
+export function closeLauncherBrowserConnection(browser: { close(): Promise<void> }): Promise<void> {
+  let closing = connectionClosures.get(browser);
+  if (!closing) {
+    closing = Promise.resolve().then(() => browser.close());
+    connectionClosures.set(browser, closing);
+  }
+  return closing;
 }
 
 export async function runLauncherBrowserConnection<TBrowser, TResult>(

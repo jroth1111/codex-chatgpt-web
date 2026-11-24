@@ -50,12 +50,13 @@ and automatic compaction without embedding a giant fixture in the user prompt. I
 directly rather than through deferred tool search so the test can prove the requested call happened.
 
 Reusing the same name continues its canonical Responses history. Sequential native messages in the
-same compaction epoch lease one Temporary Chat, exactly like production. Every message receives a
+same compaction epoch lease one ChatGPT conversation, exactly like production. Every message receives a
 new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
 response. On an exact native compaction request, the same Web agent submits the checkpoint through
 a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
-new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
-chats use the cheapest account-supported browser mode:
+new chat. The complete named history remains owned by the existing prompt compiler. New
+chats follow the configured **Save chats in ChatGPT** setting (off by default) and use the cheapest
+account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
 Interactive commands:
@@ -142,7 +143,9 @@ stage must still fit the selected ChatGPT mode's measured one-message boundary.
 Small turns use one request. Two-part turns use one inert staging request and one final request;
 six-part turns use five staging requests and one final request. Browser-only compaction also uses
 six parts. Inert stages use the fastest available mode that fits their complete messages; the final
-part uses the selected execution effort. Large turns may increase the probability of
+part uses the selected execution effort. Plus Instant uploads keep the same input headroom as
+ordinary Instant turns; the selected final mode can receive a larger share of the context.
+Large turns may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.

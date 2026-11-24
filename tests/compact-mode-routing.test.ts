@@ -112,7 +112,7 @@ describe("compact mode routing", () => {
       const prepared = await turn.prepare();
       preparedText = prepared.text;
       prepared.release();
-      const token = /turn_token (control_\w+)/.exec(preparedText)![1]!;
+      const token = /turn_token (turn_\w+)/.exec(preparedText)![1]!;
       const handoffId = /handoff_id (handoff_\w+)/.exec(preparedText)![1]!;
       await callTurnBroker(socketPath, { method: "submit_compaction_handoff", token, handoffId, summary });
       if (!turn.abortSignal?.aborted) {
@@ -183,7 +183,7 @@ describe("compact mode routing", () => {
         nativeConnectorAvailable: true,
         timeoutMs: 20,
         startFallback: async (_traceId, signal, _onProgress, _retainOwnershipUntil, instruction) => {
-          const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+          const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
           const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
           await callTurnBroker(socketPath, {
             method: "submit_compaction_handoff", token, handoffId, summary: "Fallback checkpoint summary.",
@@ -238,7 +238,7 @@ describe("compact mode routing", () => {
         nativeConnectorAvailable: true,
         timeoutMs: 20,
         startFallback: async (_traceId, signal, _onProgress, _retainOwnershipUntil, instruction) => {
-          const token = /turn_token (control_\w+)/.exec(instruction)![1]!;
+          const token = /turn_token (turn_\w+)/.exec(instruction)![1]!;
           const handoffId = /handoff_id (handoff_\w+)/.exec(instruction)![1]!;
           await callTurnBroker(socketPath, {
             method: "submit_compaction_handoff", token, handoffId, summary: "Fallback checkpoint summary.",
@@ -277,7 +277,7 @@ describe("compact mode routing", () => {
 
     try {
       await createChatGptWebAdapter(config).runTurn!(request, { headers: new Headers() }, () => {});
-      expect(browserTurn?.retryPromptForAnswer?.("ordinary answer", 1)).toBeUndefined();
+      expect(await browserTurn?.retryPromptForAnswer?.("ordinary answer", 1)).toBeUndefined();
       expect(browserTurn?.retryPromptForError).toBeUndefined();
       expect(browserTurn?.retainConversation).toBe(true);
       expect(browserTurn?.conversationKey).toMatch(/^[a-f0-9]{64}$/);
@@ -319,10 +319,10 @@ describe("compact mode routing", () => {
     try {
       await createChatGptWebAdapter(config).runTurn!(request, { headers: new Headers() }, () => {});
       expect(browserTurn?.retainConversation).toBeUndefined();
-      expect(browserTurn?.retryPromptForAnswer?.("Gathering test_deploy_artifacts.py diff", 1)).toContain(
+      expect(await browserTurn?.retryPromptForAnswer?.("Gathering test_deploy_artifacts.py diff", 1)).toContain(
         "only a progress update",
       );
-      expect(() => browserTurn?.retryPromptForAnswer?.("Gathering the same diff", 2)).toThrow(
+      await expect(browserTurn?.retryPromptForAnswer?.("Gathering the same diff", 2)).rejects.toThrow(
         "subagent completed with only a progress update",
       );
       const retry = claudeBrowserTurnOptions(request, undefined, {
@@ -397,7 +397,7 @@ describe("compact mode routing", () => {
         "The native shell gateway is unavailable, so I could not run the command.",
         1,
       )).toBeUndefined();
-      expect(browserTurn?.retryPromptForAnswer?.("No findings.", 1)).toBeUndefined();
+      expect(await browserTurn?.retryPromptForAnswer?.("No findings.", 1)).toBeUndefined();
     } finally {
       worker.run = originalRun;
     }

@@ -1,3 +1,4 @@
+import { spyOn } from "bun:test";
 import { expect, test } from "bun:test";
 import { chatGptRetainedSurfaceUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
 import type { BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
@@ -6,7 +7,56 @@ import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSession } from "../src/ad
 import type { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import type { CodexParsedRequest } from "../src/types";
 import { deferred } from "../src/adapters/chatgpt-web/runtime-lifecycle";
+import { mock } from "node:test";
 import { CompactionTransactionStore } from "../src/adapters/chatgpt-web/compaction-transaction";
+
+test.each(["content", "generation", "heartbeat"])("retained handoff renews only real content progress: signal=%s", async activity => {
+  const store = new CompactionTransactionStore();
+  const broker = {
+    beginCompactionTransaction: async (trace: string, ttl: number) => store.begin(trace, ttl),
+    waitForCompactionHandoff: (token: string, signal?: AbortSignal) => store.wait(token, signal),
+    abortCompactionTransaction: (token: string) => store.abort(token),
+    refreshCompactionTransaction: (token: string, ttl: number) => store.refresh(token, ttl),
+  } as unknown as TurnBroker;
+  const browser = deferred<string>();
+  let running: BrowserTurn | undefined;
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const clockNow = spyOn(performance, "now").mockImplementation(() => Date.now());
+  const run = requestRetainedCompactionHandoff({ run: turn => {
+    running = turn;
+    turn.abortSignal!.addEventListener("abort", () => browser.resolve("settled"), { once: true });
+    return browser.promise;
+  } }, parsed, source(), broker, { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+  "retained_progress", undefined, 40);
+  let failure: unknown;
+  void run.catch(error => { failure = error; });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    mock.timers.tick(25);
+    if (activity === "heartbeat") running!.onHeartbeat?.();
+    else if (activity === "generation") running!.onGenerationProgress?.();
+    else running!.onProgress?.();
+    mock.timers.tick(25);
+    if (activity !== "content") {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("timed out after 40ms");
+    }
+    else {
+      const prompt = await running!.prepare();
+      const token = /turn_token (turn_\w+)/.exec(prompt.text)![1]!;
+      const id = /handoff_id (handoff_\w+)/.exec(prompt.text)![1]!;
+      store.submit(token, id, "Complete generation-aware handoff.");
+      prompt.release();
+      expect(await run).toBe("Complete generation-aware handoff.");
+    }
+  } finally {
+    browser.resolve("cleanup");
+    clockNow.mockRestore();
+    mock.timers.reset();
+    await run.catch(() => {});
+  }
+});
 
 const parsed: CodexParsedRequest = {
   modelId: "chatgpt-web", stream: true,
@@ -21,33 +71,6 @@ function source(): ChatGptTurnSession {
     conversationKey: "b".repeat(64), cancel() {},
   });
 }
-
-test("default compaction has no inferred deadline and cancellation retains physical ownership", async () => {
-  const store = new CompactionTransactionStore();
-  const browser = deferred<string>();
-  const owner = new AbortController();
-  const started = deferred<void>();
-  let token = "";
-  let retained: Promise<void> | undefined;
-  const broker = {
-    beginCompactionTransaction: async (trace: string, ttl: number | null) => {
-      expect(ttl).toBeNull(); const handle = store.begin(trace, ttl); token = handle.token; return handle;
-    },
-    waitForCompactionHandoff: (value: string, signal?: AbortSignal) => store.wait(value, signal),
-    abortCompactionTransaction: (value: string) => store.abort(value),
-  } as unknown as TurnBroker;
-  const run = requestRetainedCompactionHandoff({run: () => { started.resolve(); return browser.promise; }},
-    parsed, source(), broker, {localToolsEnabled:true,solAvailable:true,proAvailable:true},
-    "default_deadline_free", owner.signal, undefined, undefined, settlement => { retained = settlement; });
-  try {
-    await started.promise;
-    owner.abort(new DOMException("operator cancelled", "AbortError"));
-    await expect(run).rejects.toMatchObject({name:"AbortError"});
-    expect(retained).toBeDefined();
-    expect(await Promise.race([retained!.then(() => "settled"), Promise.resolve("owned")])).toBe("owned");
-    expect(() => store.submit(token, "wrong", "A usable checkpoint summary")).toThrow("invalid, expired, or consumed");
-  } finally { browser.resolve("cleanup"); await retained; store.close(); }
-});
 
 for (const accepted of [false, true]) test(`retained deadline bounds an uncooperative browser (checkpoint accepted: ${accepted})`, async () => {
   const browser = deferred<string>();

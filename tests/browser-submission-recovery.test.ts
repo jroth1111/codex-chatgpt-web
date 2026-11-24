@@ -14,13 +14,16 @@ import { ChatGptPromptOperation } from "../src/adapters/chatgpt-web/prompt-opera
 import { chatGptPromptPreservesLeading, planChatGptPromptInsertion } from "../src/adapters/chatgpt-web/prompt-insertion-plan";
 import { chatGptPromptAttachmentTimeoutMs } from "../src/adapters/chatgpt-web/prompt-attachment-budget";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
+import { estimateTokens } from "../src/lib/token-estimate";
+import { skillFileTokens } from "../src/adapters/chatgpt-web/skill-attachments";
 import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_SEND_BUTTON_SELECTOR,
   CHATGPT_USER_TURN_SELECTOR,
+  chatGptTurnContainerSelector,
 } from "../src/chatgpt-session";
-import { activateChatGptSendControl, activateOwnedChatGptSendControl, readChatGptAssistantTurnState } from "../src/adapters/chatgpt-web/response-turn-boundary";
+import { activateChatGptSendControl, submitChatGptSendControl, activateOwnedChatGptSendControl, readChatGptAssistantTurnState } from "../src/adapters/chatgpt-web/response-turn-boundary";
 import { ChatGptViewportReadinessError, chatGptSuspensionClock } from "../src/adapters/chatgpt-web/browser-stage-lifecycle";
 
 type Recovery = (attempt: number, cause: Error, signal?: AbortSignal) => Promise<Page>;
@@ -58,6 +61,8 @@ function surface(
   options: { url?: () => string; composerText?: () => string } = {},
 ) {
   const hidden = {
+    locator() { return this; },
+    evaluateAll: async (read: (elements: Element[]) => unknown) => read([]),
     filter() { return this; }, last() { return this; }, getByText() { return this; }, getByTestId() { return this; },
     isVisible: async () => false, count: async () => 0,
   };
@@ -564,7 +569,10 @@ test("production send and multipart observation wire same-page recovery for laun
   const source = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(source.includes("const toolTurnObservationRecovery = launcherSurfaceId !== undefined")).toBeTrue();
   expect(source.includes("callerSignal")).toBeTrue();
-  expect((source.match(/toolTurnObservationRecovery,/g) ?? []).length).toBe(3);
+  expect((source.match(/toolTurnObservationRecovery,|toolTurnObservationRecovery \? async/g) ?? []).length).toBe(3);
+  const observe = source.indexOf("const observeSubmission =");
+  expect(source.indexOf("await retireActivation?.();", observe))
+    .toBeLessThan(source.indexOf("return toolTurnObservationRecovery(...args);", observe));
   expect(source.includes("responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR)")).toBeTrue();
 });
 
@@ -631,14 +639,18 @@ test.each(["final", "multipart", "final-prewrap", "final-multipart-prewrap", "fi
     ? source.indexOf('        await this.runStage(\n          turn.traceId,\n          "send",')
     : source.indexOf("        for (let index = 0; index < multipartTransport.stages.length;");
   const end = lane !== "multipart"
-    ? source.indexOf('        await diagnostics.capture(page, "send-accepted");', start)
+    ? source.indexOf('        if (!recoveryObservationOnly) await diagnostics.capture(page, "send-accepted");', start)
     : source.indexOf("        // The first saved message changes", start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const progress = new ChatGptExternalTurnProgress();
   const dependencies = {
     usageSubmission: async () => undefined, recordFinalUsage: undefined,
+    estimateTokens, skillFileTokens, estimatedInputTokens: 1,
+    generation: { active: () => false, progress() {} },
+    streamDiagnostics: { begin() {} },
     submissionRejection: {
+      captureAlertBaseline: async () => {},
       begin() {},
       activate() {},
       ownedSubmissionRequestObserved: () => false,
@@ -653,6 +665,7 @@ test.each(["final", "multipart", "final-prewrap", "final-multipart-prewrap", "fi
     first, next, initial, events, ChatGptPromptOperation, connectorAttemptBudget: { remaining: 3 },
     turn: {
       traceId: `production-${lane}-rebind`, externalProgress: progress,
+      capabilities: { proAvailable: true },
       onSendActivated: () => { events.push("activated"); progress.recordBrokerActivity(); },
       onSubmitted: () => { events.push("submitted"); },
     },
@@ -664,11 +677,11 @@ test.each(["final", "multipart", "final-prewrap", "final-multipart-prewrap", "fi
     diagnostics: { capture: async () => {} },
     settleChatGptUi: async () => {},
     CHATGPT_SEND_ENABLE_GRACE_MS: 5_000,
-    CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_SEND_BUTTON_SELECTOR, CHATGPT_USER_TURN_SELECTOR,
+    CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_SEND_BUTTON_SELECTOR, CHATGPT_USER_TURN_SELECTOR, chatGptTurnContainerSelector,
     CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSuspensionClock,
     chatGptPromptAttachmentTimeoutMs, chatGptPromptPreservesLeading, planChatGptPromptInsertion,
     throwIfChatGptSessionFailureAlert, throwIfChatGptRateLimitDialog,
-    activateChatGptSendControl, activateOwnedChatGptSendControl, readChatGptAssistantTurnState,
+    activateChatGptSendControl, submitChatGptSendControl, activateOwnedChatGptSendControl, readChatGptAssistantTurnState,
   };
   const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(`
     async function run() {
@@ -680,6 +693,7 @@ test.each(["final", "multipart", "final-prewrap", "final-multipart-prewrap", "fi
       let initialUserTurnCount = 1;
       let submissionBaseline = first.baseline;
       const reuseConversation = false;
+      const acknowledgedStages = [];
       const responseAttempt = 1;
       let initialToolBatchRevision = 0;
       let beforeRecoveryInsertion;
@@ -717,7 +731,7 @@ test.each(["final", "multipart", "final-prewrap", "final-multipart-prewrap", "fi
     }
   } else {
     expect(events).toEqual(["attach", "verify:stage", "send", "rebind", "ack"]);
-    expect(next.selected).toEqual(["conversation-turn-new"]);
+    expect(next.selected).toEqual(["conversation-turn-new", "conversation-turn-new"]);
   }
 });
 
@@ -746,4 +760,71 @@ test("a failed first rebind shares the two-attempt budget and never reactivates 
   expect(attempts).toEqual([1, 2]);
   expect([presses, activated]).toEqual([1, 1]);
   expect(progress.snapshot().lastToolBatchRevision).toBe(revision);
+});
+
+
+test.each(["accepted", "late-accepted", "cancelled", "press-failed"] as const)(
+  "blocked Enter races submission evidence exactly once: %s", async outcome => {
+  const fixture = surface(() => new Promise<State>(() => {}));
+  const instance = worker();
+  const progress = new ChatGptExternalTurnProgress();
+  const controller = new AbortController();
+  let presses = 0;
+  let activationCancelled = false;
+  instance.activeComposer = async () => ({ locator: () => ({ locator: () => ({
+    waitFor: async () => {}, isEnabled: async () => true,
+    press: async (_key: string, options: { signal: AbortSignal }) => {
+      presses++;
+      if (outcome === "press-failed") throw new Error("keypress rejected");
+      if (outcome === "accepted") progress.recordToolBatch(1);
+      else if (outcome === "late-accepted") setTimeout(() => progress.recordToolBatch(1), 10);
+      else setTimeout(() => controller.abort(), 10);
+      await new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => {
+        activationCancelled = true;
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true }));
+    },
+  }) }) });
+  const send = instance.sendAttachedPrompt(fixture.page, fixture.baseline, initial, undefined,
+    controller.signal, undefined, progress);
+  try {
+    if (outcome === "accepted" || outcome === "late-accepted") expect(await bounded(send, 300)).toBe("mcp_tool_call");
+    else if (outcome === "cancelled") await expect(bounded(send, 300)).rejects.toMatchObject({ name: "AbortError" });
+    else await expect(bounded(send, 300)).rejects.toThrow("keypress rejected");
+    expect(presses).toBe(1);
+    if (outcome !== "press-failed") expect(activationCancelled).toBeTrue();
+  } finally {
+    controller.abort();
+    await send.catch(() => {});
+  }
+});
+
+test.each(["accepted", "recovery-failed", "cancelled"] as const)("same-page recovery owns a disconnected pending Enter: %s", async outcome => {
+  const first = surface(timeout);
+  const next = surface(async () => ({ count: 1, lastId: "conversation-turn-new" }));
+  const instance = worker();
+  const controller = new AbortController();
+  let presses = 0;
+  let submitted = false;
+  let recovered = false;
+  let disconnect!: (reason: Error) => void;
+  instance.activeComposer = async () => ({ locator: () => ({ locator: () => ({
+    waitFor: async () => {}, isEnabled: async () => true,
+    press: async () => { presses++; await new Promise<void>((_resolve, reject) => { disconnect = reject; }); },
+  }) }) });
+  const result = await instance.sendAttachedPrompt(first.page, first.baseline, initial, undefined,
+    controller.signal, undefined, undefined, async (_attempt, _cause, signal) => {
+      disconnect(new Error("locator.press: Target page, context or browser has been closed"));
+      await new Promise(resolve => setTimeout(resolve, 15));
+      if (outcome === "cancelled") controller.abort();
+      signal?.throwIfAborted();
+      if (outcome === "recovery-failed") throw new Error("same-page recovery failed");
+      recovered = true;
+      return next.page;
+    }).then(value => { submitted = true; return { value }; }, error => ({ error }));
+  expect(presses).toBe(1);
+  expect(submitted).toBe(outcome === "accepted");
+  if (outcome === "accepted") { expect(result).toEqual({ value: "assistant_turn" }); expect(recovered).toBeTrue(); }
+  else if (outcome === "recovery-failed") expect(result).toMatchObject({ error: { message: "same-page recovery failed" } });
+  else expect(result).toMatchObject({ error: { name: "AbortError" } });
 });

@@ -25,39 +25,38 @@ interface CompactionTransaction extends CompactionTransactionHandle {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-function opaqueId(prefix: "control" | "handoff"): string {
+function opaqueId(prefix: "turn" | "handoff"): string {
   return `${prefix}_${randomBytes(16).toString("hex")}`;
 }
 
 export class CompactionTransactionStore {
   private readonly transactions = new Map<string, CompactionTransaction>();
 
-  begin(traceId: string, ttlMs: number | null, beforeAccept?: (summary: string) => void): CompactionTransactionHandle {
+  begin(traceId: string, ttlMs: number, beforeAccept?: (summary: string) => void): CompactionTransactionHandle {
     if (!traceId.trim()) throw new Error("compaction transaction trace id is required");
-    if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
       throw new Error("compaction transaction TTL must be a positive finite number");
     }
     const transaction: CompactionTransaction = {
-      token: opaqueId("control"),
+      // The native MCP contract accepts turn_ capabilities. Authority comes from
+      // this summary-only store; this token never enters the ordinary tool registry.
+      token: opaqueId("turn"),
       handoffId: opaqueId("handoff"),
       traceId,
       state: "pending",
       kind: beforeAccept ? "recovery" : "compaction",
       ...(beforeAccept ? { beforeAccept } : {}),
     };
-    if (ttlMs !== null) this.armTimeout(transaction, ttlMs);
+    this.armTimeout(transaction, ttlMs);
     this.transactions.set(transaction.token, transaction);
     return { token: transaction.token, handoffId: transaction.handoffId };
   }
 
-  refresh(token: string, ttlMs: number | null): void {
+  refresh(token: string, ttlMs: number): void {
     const transaction = this.transactions.get(token);
     if (!transaction) throw new Error("compaction control token is invalid, expired, or consumed");
     if (transaction.state !== "pending") return;
-    if (ttlMs === null) {
-      if (transaction.timer) clearTimeout(transaction.timer);
-      transaction.timer = undefined;
-    } else this.armTimeout(transaction, ttlMs);
+    this.armTimeout(transaction, ttlMs);
   }
 
   submit(token: string, handoffId: string, summary: string, kind: "compaction" | "recovery" = "compaction"): void {

@@ -1,5 +1,6 @@
 import type { Locator } from "playwright-core";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { withAbort } from "./runtime-lifecycle";
 import {
   chatGptAssistantTurnSelector,
   isTemporaryChatGptTurnUrl,
@@ -40,6 +41,37 @@ export async function activateChatGptSendControl(
   // The outer stage owns the budget; submission evidence remains the completion authority.
   onActivate?.();
   await sendButton.press("Enter", { noWaitAfter: true, timeout: 0, signal });
+}
+
+export async function submitChatGptSendControl<T>(
+  sendButton: Pick<Locator, "press">,
+  observe: (signal: AbortSignal, retireActivation: () => Promise<void>) => Promise<T>,
+  signal?: AbortSignal,
+  onActivate?: () => void,
+): Promise<T> {
+  const pending = new AbortController();
+  const ownedSignal = signal ? AbortSignal.any([signal, pending.signal]) : pending.signal;
+  ownedSignal.throwIfAborted();
+  // Renderer key handling may remain blocked after MCP has already accepted this exact Send.
+  const activationAbort = new AbortController();
+  const activationSignal = AbortSignal.any([ownedSignal, activationAbort.signal]);
+  let retiredForRecovery = false;
+  const activation = withAbort(activateChatGptSendControl(sendButton, activationSignal, onActivate), activationSignal)
+    .catch(error => {
+      if (!retiredForRecovery || ownedSignal.aborted || !(error instanceof DOMException)
+        || error.name !== "AbortError") throw error;
+    });
+  const accepted = observe(ownedSignal, async () => {
+    // Retire only the obsolete command receipt before reconnect disconnects its transport.
+    retiredForRecovery = true;
+    activationAbort.abort();
+    await activation;
+  });
+  try {
+    return await Promise.race([accepted, activation.then(() => accepted)]);
+  } finally {
+    pending.abort();
+  }
 }
 
 export class ChatGptOwnedSendStateUnknownError extends Error {
@@ -249,8 +281,14 @@ export async function readChatGptTurnIdentities(
         || (!element.closest("[data-turn-key]") && element.parentElement?.closest("[data-turn-id-container]")
           ?.getAttribute("data-turn-id-container") !== element.getAttribute("data-turn-id-container")))
       : elements;
+    const groupKeys = candidates.map(element => element.getAttribute("data-turn-key"))
+      .filter((key): key is string => key !== null);
+    if (groupKeys.some(key => key.trim().length === 0)) throw new Error("ChatGPT conversation group has no stable identity");
+    if (new Set(groupKeys).size !== groupKeys.length) return groupKeys.map(key => `group:user:${key}`);
     const identities = candidates.flatMap(element => {
       const key = element.getAttribute("data-turn-key");
+      // The baseline keeps both roles; only a mounted bubble proves a current user turn.
+      if (key !== null && name === "data-turn-id" && !element.querySelector("[data-user-message-bubble]")) return [];
       return key === null ? [element.getAttribute(name)] : name === "data-turn-id-container"
         ? [`group:user:${key}`, `group:assistant:${key}`]
         : [`group:user:${key}`];
@@ -276,8 +314,22 @@ export function chatGptNewTurnIdentity(
   current: readonly string[],
 ): string | undefined {
   const previous = new Set(initial);
-  const added = current.filter(identity => !previous.has(identity));
-  if (added.length > 1) throw new Error(`ChatGPT exposed ${added.length} new conversation turns for one submitted message`);
+  const observed = new Set(current);
+  const retainedInitial = initial.filter(identity => observed.has(identity));
+  const retainedCurrent = current.filter(identity => previous.has(identity));
+  if (retainedInitial.length !== retainedCurrent.length
+    || retainedInitial.some((identity, index) => identity !== retainedCurrent[index])) {
+    throw new Error(`ChatGPT conversation history order changed after Send (initial=${initial.length}, current=${current.length})`);
+  }
+  // An unchanged retained anchor separates remounted history from post-Send turns.
+  // Without one, every unknown identity remains a potential new submission.
+  const anchor = retainedInitial.at(-1);
+  const boundary = anchor === undefined ? -1 : current.lastIndexOf(anchor);
+  const added = current.slice(boundary + 1).filter(identity => !previous.has(identity));
+  if (added.length > 1) {
+    throw new Error(`ChatGPT exposed ${added.length} new conversation turns for one submitted message`
+      + ` (initial=${initial.length}, current=${current.length}, retained=${retainedInitial.length}, beforeAnchor=${boundary + 1})`);
+  }
   return added[0];
 }
 
