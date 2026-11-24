@@ -310,7 +310,7 @@ export class TurnBroker implements TurnBrokerOwner {
     const { call_id, ...logReceipt } = receipt;
     logNativeWorkflow(channel.traceId, { phase: "tool_result_returned", ...logReceipt,
       call_id_hash: createHash("sha256").update(call_id).digest("hex").slice(0, 24) });
-    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
+    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size} isError=${result.isError === true}`);
     invocation.resolve(invocation.includeResultReceipt ? { ...result, _meta: {
       ...(result._meta && typeof result._meta === "object" && !Array.isArray(result._meta) ? result._meta : {}),
       codex_native_result: receipt,

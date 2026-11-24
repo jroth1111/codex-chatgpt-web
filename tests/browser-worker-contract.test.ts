@@ -1426,7 +1426,7 @@ test("connector verification persists ordered browser checkpoints when selection
 });
 
 test.each([false, true])("connector verification prepares the selected chat mode (%s) and clears its selection", async useSavedChats => {
-  const diagnosticsRoot = mkdtempSync(join(tmpdir(), "cgw-connector-verification-success-"));
+  const diagnosticsRoot = mkdtempSync(join(tmpdir(), "cgw-cv-"));
   const socket = defaultBrokerEndpoint(diagnosticsRoot);
   const broker = TurnBroker.forSocket(socket);
   await broker.listen();
